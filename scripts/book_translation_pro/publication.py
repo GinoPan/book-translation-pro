@@ -542,21 +542,26 @@ def _pdf_inventory(path: Path) -> dict[str, Any]:
         import fitz
     except ImportError:
         return {"text": "", "text_available": False}
-    # Running heads/feet inject bare page-number lines and repeated titles at
-    # page boundaries; drop those zones geometrically so body anchors split
-    # across a page break still match contiguously.
-    page_number_line = re.compile(r"(?im)^[ \t]*(?:[ivxlcdm]{1,8}|\d{1,5})[ \t]*$")
+    # Running heads/feet inject bare page-number blocks and repeated titles at
+    # page boundaries. Drop those zones geometrically and reject only a block
+    # whose entire payload is a folio. Word PDF extraction can represent every
+    # word in a body sentence on its own text line; applying a multiline regex
+    # to the joined body would then erase legitimate values such as ``2 mm``.
+    page_number_block = re.compile(r"^(?:[ivxlcdm]{1,8}|\d{1,5})$", re.IGNORECASE)
     with fitz.open(path) as document:
         pieces = []
         for page in document:
             height = page.rect.height
-            body = [
-                str(block[4])
-                for block in page.get_text("blocks")
-                if block[1] > height * 0.09 and block[3] < height * 0.91
-            ]
+            body = []
+            for block in page.get_text("blocks"):
+                text = str(block[4]).strip()
+                if block[1] <= height * 0.09 or block[3] >= height * 0.91:
+                    continue
+                if page_number_block.fullmatch(text):
+                    continue
+                body.append(str(block[4]))
             pieces.append("\n".join(body))
-        joined = page_number_line.sub("", "\n".join(pieces))
+        joined = "\n".join(pieces)
         return {
             "text": _normalize_inventory_text(joined, rendered=True),
             "text_available": True,

@@ -12,6 +12,7 @@ from book_translation_pro.publication import (
     _infer_target_title,
     _insert_original_title_line,
     _normalize_image_markup,
+    _pdf_inventory,
     _restore_promoted_image_assets,
     clean_markdown_for_publication,
     validate_docx_package,
@@ -21,6 +22,23 @@ from book_translation_pro.publication import (
 
 
 class PublicationCleanupTests(unittest.TestCase):
+    def test_pdf_inventory_preserves_body_numbers_extracted_as_bare_lines(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "body-numbers.pdf"
+            document = fitz.open()
+            page = document.new_page()
+            page.insert_textbox(
+                fitz.Rect(72, 100, 400, 220),
+                "This chapter preserves value\n2\nmm and reference.",
+            )
+            page.insert_text((300, 800), "2")
+            document.save(path)
+            document.close()
+            inventory = _pdf_inventory(path)
+            self.assertIn("thischapterpreservesvalue2mmandreference", inventory["text"])
+
     def test_valid_epub_topology_passes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "book.epub"
