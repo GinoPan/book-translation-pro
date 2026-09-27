@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/qa-exceptions.schema.json",
+  "title": "Book Translation Pro QA exceptions",
+  "type": "object",
+  "required": ["schema_version", "exceptions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "check_id", "scope", "rationale", "status", "approved_by", "approved_at", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^EX-[A-Za-z0-9._-]+$"},
+          "check_id": {"type": "string", "minLength": 1},
+          "scope": {"type": "string", "minLength": 1},
+          "rationale": {"type": "string", "minLength": 1},
+          "status": {"enum": ["approved", "rejected", "expired"]},
+          "approved_by": {"type": "string", "minLength": 1},
+          "approved_at": {"type": "string", "format": "date-time"},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "artifact_hashes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

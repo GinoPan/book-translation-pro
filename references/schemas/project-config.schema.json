@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/project-config.schema.json",
+  "title": "Book Translation Pro project configuration",
+  "type": "object",
+  "required": ["schema_version", "project_id", "source", "target", "mode", "outputs", "workspace"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "project_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+    "source": {
+      "type": "object",
+      "required": ["path", "language"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "language": {"type": "string", "minLength": 2},
+        "format": {"enum": ["auto", "pdf", "docx", "epub", "chm"]},
+        "edition": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "required": ["language"],
+      "properties": {
+        "language": {"type": "string", "minLength": 2},
+        "locale": {"type": "string"},
+        "script": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "mode": {"enum": ["fast", "study", "publication"]},
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"enum": ["markdown", "docx", "epub", "pdf", "bilingual"]}
+    },
+    "workspace": {"type": "string", "minLength": 1},
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "title": {"type": "string"},
+        "original_title": {"type": "string"},
+        "author": {"type": "string"},
+        "translator": {"type": "string"},
+        "cover": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:|/|\\\\|.*(?:^|/)\\.\\.(?:/|$)).+"}
+      },
+      "additionalProperties": false
+    },
+    "execution": {
+      "type": "object",
+      "properties": {
+        "runtime_adapter": {"enum": ["auto", "parallel", "sequential", "local_parallel", "host_workers", "external_queue"]},
+        "max_parallel": {"type": "integer", "minimum": 1, "maximum": 64},
+        "max_attempts_per_unit": {"type": "integer", "minimum": 1, "maximum": 5},
+        "keep_intermediates": {"type": "boolean"},
+        "checkpoints": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["preflight", "terminology", "visual_exceptions", "publication_signoff"]}
+        }
+      },
+      "additionalProperties": false
+    },
+    "chunking": {
+      "type": "object",
+      "properties": {
+        "target_characters": {"type": "integer", "minimum": 1000, "maximum": 30000},
+        "hard_max_characters": {"type": "integer", "minimum": 1500, "maximum": 50000},
+        "prefer_section_boundaries": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "terminology": {
+      "type": "object",
+      "properties": {
+        "bootstrap_samples": {"type": "integer", "minimum": 1, "maximum": 50},
+        "high_frequency_limit": {"type": "integer", "minimum": 0, "maximum": 200},
+        "require_review_before_translation": {"type": "boolean"}
+        ,"libraries": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:|/|\\\\|.*(?:^|/)\\.\\.(?:/|$)).+"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "style_guide": {
+      "type": "object",
+      "properties": {
+        "template": {"enum": ["general", "academic", "technical", "business"]}
+      },
+      "additionalProperties": false
+    },
+    "context_capsule": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "max_characters": {"type": "integer", "minimum": 200, "maximum": 8000}
+      },
+      "additionalProperties": false
+    },
+    "passes": {
+      "type": "object",
+      "properties": {
+        "edit": {"type": "boolean"},
+        "visual_qa": {"type": "boolean"},
+        "completeness_qa": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "visual": {
+      "type": "object",
+      "properties": {
+        "renderer": {"enum": ["auto", "pymupdf", "poppler"]},
+        "render_dpi": {"type": "integer", "minimum": 96, "maximum": 400},
+        "minimum_review_risk": {"type": "integer", "minimum": 0, "maximum": 3},
+        "minimum_text_characters": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "thumbnail_width": {"type": "integer", "minimum": 64, "maximum": 1024},
+        "ocr_mode": {"enum": ["auto", "off", "required"]},
+        "ocr_languages": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 2}},
+        "embedded_text": {"enum": ["preserve", "translate_caption", "review", "redraw"]}
+      },
+      "additionalProperties": false
+    },
+    "resume": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "hash_algorithm": {"const": "sha256"}
+      },
+      "additionalProperties": false
+    },
+    "publishing": {
+      "type": "object",
+      "properties": {
+        "clean_extraction_artifacts": {"type": "boolean"},
+        "trim_width_mm": {"type": "number", "minimum": 100, "maximum": 300},
+        "trim_height_mm": {"type": "number", "minimum": 140, "maximum": 400},
+        "inside_margin_mm": {"type": "number", "minimum": 10, "maximum": 60},
+        "outside_margin_mm": {"type": "number", "minimum": 10, "maximum": 60},
+        "top_margin_mm": {"type": "number", "minimum": 10, "maximum": 60},
+        "bottom_margin_mm": {"type": "number", "minimum": 10, "maximum": 60},
+        "gutter_mm": {"type": "number", "minimum": 0, "maximum": 30},
+        "body_font_east_asia": {"type": "string", "minLength": 1},
+        "body_font_latin": {"type": "string", "minLength": 1},
+        "heading_font_east_asia": {"type": "string", "minLength": 1},
+        "heading_font_latin": {"type": "string", "minLength": 1},
+        "body_font_size_pt": {"type": "number", "minimum": 8, "maximum": 16},
+        "line_spacing": {"type": "number", "minimum": 1, "maximum": 2.5},
+        "toc_depth": {"type": "integer", "minimum": 1, "maximum": 4},
+        "bilingual_formats": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["markdown", "docx", "epub", "pdf"]}
+        }
+      },
+      "additionalProperties": false
+    },
+    "custom_instructions": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

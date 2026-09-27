@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/visual-review.schema.json",
+  "title": "Book Translation Pro Visual Review",
+  "type": "object",
+  "required": ["schema_version", "page_index", "page_hash", "status", "reviewer", "reviewed_at", "notes", "findings"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "page_index": {"type": "integer", "minimum": 1},
+    "page_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "status": {"enum": ["pending", "approved", "changes_requested", "exception_approved"]},
+    "reviewer": {"type": "string"},
+    "reviewed_at": {"type": "string"},
+    "notes": {"type": "string"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "category", "severity", "description", "region_ids", "unit_ids", "affects_translation", "resolution", "status"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "category": {"enum": ["reading_order", "ocr", "table", "figure", "formula", "caption", "footnote", "sidebar", "source_extraction", "other"]},
+          "severity": {"type": "integer", "minimum": 0, "maximum": 3},
+          "description": {"type": "string", "minLength": 1},
+          "region_ids": {"type": "array", "items": {"type": "string"}},
+          "unit_ids": {"type": "array", "items": {"type": "string"}},
+          "affects_translation": {"type": "boolean"},
+          "resolution": {"type": "string"},
+          "status": {"enum": ["open", "resolved", "exception_approved"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

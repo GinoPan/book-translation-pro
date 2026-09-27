@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/book-map.schema.json",
+  "title": "Book Translation Pro Book Map",
+  "type": "object",
+  "required": ["schema_version", "source_fingerprint", "root_ids", "nodes"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "source_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "root_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "order", "title", "source_span", "children", "status"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["cover", "title_page", "copyright", "toc", "front_matter", "part", "chapter", "section", "appendix", "notes", "bibliography", "index", "back_matter", "other"]},
+          "order": {"type": "integer", "minimum": 0},
+          "title": {
+            "type": "object",
+            "required": ["source"],
+            "properties": {"source": {"type": "string"}, "target": {"type": "string"}},
+            "additionalProperties": false
+          },
+          "source_span": {
+            "type": "object",
+            "required": ["segment_ids"],
+            "properties": {
+              "page_start": {"type": "integer", "minimum": 1},
+              "page_end": {"type": "integer", "minimum": 1},
+              "segment_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+            },
+            "additionalProperties": false
+          },
+          "children": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "artifact_refs": {"type": "array", "items": {"type": "string"}},
+          "visual_refs": {"type": "array", "items": {"type": "string"}},
+          "note_refs": {"type": "array", "items": {"type": "string"}},
+          "status": {"enum": ["mapped", "needs_review", "approved", "skipped_approved"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

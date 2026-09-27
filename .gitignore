@@ -1,0 +1,31 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging and build outputs
+build/
+dist/
+*.egg-info/
+*.whl
+
+# Local environments and tooling
+.venv/
+venv/
+.env
+.env.*
+.local-wheel-check/
+
+# Test and coverage artifacts
+tests/.artifacts/
+.coverage
+htmlcov/
+
+# Local backups and editor files
+*.bak-*
+*.swp
+*.tmp
+.DS_Store
+Thumbs.db

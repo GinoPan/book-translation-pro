@@ -1,0 +1,6 @@
+interface:
+  display_name: "Book Translation Pro"
+  short_description: "Resumable book translation with PDF visual QA and CHM support"
+  default_prompt: "Use $book-translation-pro for a Study-mode whole-book translation from PDF, DOCX, EPUB, or CHM with terminology, Context Capsules, editing, Page Map evidence for PDFs, OCR when needed, and visual/completeness QA."
+policy:
+  allow_implicit_invocation: true

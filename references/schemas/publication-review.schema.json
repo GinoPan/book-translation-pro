@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/publication-review.schema.json",
+  "title": "Book Translation Pro final rendered publication review",
+  "type": "object",
+  "required": ["schema_version", "candidate_sha256", "clean_master_sha256", "reviewer", "reviewed_at", "checks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "clean_master_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "reviewer": {"type": "string", "minLength": 1},
+    "reviewed_at": {"type": "string", "format": "date-time"},
+    "checks": {
+      "type": "array",
+      "minItems": 7,
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "notes"],
+        "properties": {
+          "id": {"enum": ["cover", "toc", "chapter_openings", "running_heads_feet", "figures", "dense_tables", "narrow_mobile"]},
+          "status": {"enum": ["approved", "exception"]},
+          "notes": {"type": "string"},
+          "exception_id": {"type": "string", "pattern": "^EX-[A-Za-z0-9._-]+$"},
+          "evidence": {"type": "array", "items": {"type": "string"}}
+        },
+        "allOf": [{"if": {"properties": {"status": {"const": "exception"}}}, "then": {"required": ["exception_id"]}}],
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

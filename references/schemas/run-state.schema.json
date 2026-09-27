@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/run-state.schema.json",
+  "title": "Book Translation Pro Run State",
+  "type": "object",
+  "required": ["schema_version", "project_id", "source_fingerprint", "resolved_config_hash", "stages", "units"],
+  "$defs": {
+    "status": {"enum": ["pending", "running", "completed", "failed_retryable", "failed_terminal", "invalidated", "skipped_approved"]},
+    "record": {
+      "type": "object",
+      "required": ["status", "attempts", "dependency_hashes", "output_hashes", "reason_codes"],
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "attempts": {"type": "integer", "minimum": 0},
+        "dependency_hashes": {"type": "object", "additionalProperties": {"type": "string"}},
+        "output_hashes": {"type": "object", "additionalProperties": {"type": "string"}},
+        "reason_codes": {"type": "array", "items": {"type": "string"}},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "duration_seconds": {"type": "number", "minimum": 0},
+            "input_tokens": {"type": "integer", "minimum": 0},
+            "output_tokens": {"type": "integer", "minimum": 0},
+            "cost": {"type": "number", "minimum": 0},
+            "currency": {"type": "string", "minLength": 3, "maxLength": 3}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "schema_version": {"const": 2},
+    "project_id": {"type": "string"},
+    "source_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "resolved_config_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "stages": {"type": "object", "additionalProperties": {"$ref": "#/$defs/record"}},
+    "units": {"type": "object", "additionalProperties": {"$ref": "#/$defs/record"}},
+    "human_reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["checkpoint", "status"],
+        "properties": {
+          "checkpoint": {"type": "string"},
+          "status": {"enum": ["pending", "approved", "changes_requested", "not_required"]},
+          "reviewer": {"type": "string"},
+          "recorded_at": {"type": "string", "format": "date-time"},
+          "notes": {"type": "string"},
+          "evidence_hashes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
+          "exception_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["started_at", "updated_at"],
+      "properties": {
+        "started_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

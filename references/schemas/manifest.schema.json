@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/manifest.schema.json",
+  "title": "Book Translation Pro Manifest",
+  "type": "object",
+  "required": ["schema_version", "source_fingerprint", "resolved_config_hash", "book_map_hash", "style_guide_hash", "units"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "source_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "resolved_config_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "book_map_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "page_map_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "style_guide_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "units": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["unit_id", "order", "book_node_id", "segment_ids", "source_file", "source_hash", "draft_file", "edit_file", "capsule_file", "observation_file"],
+        "properties": {
+          "unit_id": {"type": "string"},
+          "order": {"type": "integer", "minimum": 0},
+          "book_node_id": {"type": ["string", "null"]},
+          "segment_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "page_indices": {"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": true},
+          "source_file": {"type": "string"},
+          "source_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "draft_file": {"type": "string"},
+          "edit_file": {"type": "string"},
+          "capsule_file": {"type": "string"},
+          "observation_file": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

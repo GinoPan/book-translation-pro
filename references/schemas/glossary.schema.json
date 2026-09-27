@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/glossary.schema.json",
+  "title": "Book Translation Pro Glossary",
+  "type": "object",
+  "required": ["schema_version", "entries"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source", "target", "aliases", "category", "status", "confidence", "scopes", "evidence"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "source": {"type": "string", "minLength": 1},
+          "target": {"type": "string", "minLength": 1},
+          "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "category": {"enum": ["person", "place", "organization", "title", "technical_term", "product", "standard", "unit", "other"]},
+          "domain": {"type": "string"},
+          "grammatical": {"type": "object"},
+          "status": {"enum": ["proposed", "approved", "rejected", "needs_review"]},
+          "confidence": {"enum": ["low", "medium", "high"]},
+          "scopes": {"type": "array", "items": {"type": "string"}},
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["source_ref"],
+              "properties": {"source_ref": {"type": "string"}, "quote": {"type": "string", "maxLength": 300}},
+              "additionalProperties": false
+            }
+          },
+          "notes": {"type": "string"},
+          "frequency": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

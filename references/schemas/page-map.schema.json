@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/page-map.schema.json",
+  "title": "Book Translation Pro Page Map",
+  "type": "object",
+  "required": ["schema_version", "source_fingerprint", "page_count", "render", "pages"],
+  "$defs": {
+    "box": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "number", "minimum": 0, "maximum": 1},
+        "y": {"type": "number", "minimum": 0, "maximum": 1},
+        "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "height": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "schema_version": {"const": 1},
+    "source_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "page_count": {"type": "integer", "minimum": 1},
+    "render": {
+      "type": "object",
+      "required": ["renderer", "dpi"],
+      "properties": {
+        "renderer": {"enum": ["pymupdf", "poppler"]},
+        "dpi": {"type": "integer", "minimum": 96, "maximum": 400}
+      },
+      "additionalProperties": false
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page_index", "image_ref", "image_sha256", "pixel_width", "pixel_height", "page_kind", "layout", "reading_order_confidence", "text_characters", "text_sha256", "source_unit_ids", "ocr_status", "ocr_issues", "regions", "risk", "risk_reasons", "review_status"],
+        "properties": {
+          "page_index": {"type": "integer", "minimum": 1},
+          "printed_label": {"type": "string"},
+          "image_ref": {"type": "string", "minLength": 1},
+          "image_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "pixel_width": {"type": "integer", "minimum": 1},
+          "pixel_height": {"type": "integer", "minimum": 1},
+          "page_kind": {"enum": ["cover", "front_matter", "body", "appendix", "notes", "bibliography", "index", "back_matter", "blank", "other"]},
+          "layout": {"enum": ["single_column", "multi_column", "mixed", "fixed_layout", "unknown"]},
+          "reading_order_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "text_characters": {"type": "integer", "minimum": 0},
+          "text_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "source_unit_ids": {"type": "array", "items": {"type": "string"}},
+          "ocr_status": {"enum": ["not_needed", "pending", "completed", "unavailable", "failed"]},
+          "ocr_issues": {"type": "array", "items": {"type": "string"}},
+          "ocr_text_ref": {"type": "string"},
+          "ocr_text_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "ocr_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+          "regions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "role", "box", "reading_order", "source_segment_ids", "risk", "risk_reasons", "disposition"],
+              "properties": {
+                "id": {"type": "string"},
+                "role": {"enum": ["heading", "body", "quote", "list", "caption", "figure", "table", "chart", "formula", "footnote", "endnote", "sidebar", "header", "footer", "page_number", "other"]},
+                "box": {"$ref": "#/$defs/box"},
+                "reading_order": {"type": "integer", "minimum": 0},
+                "source_segment_ids": {"type": "array", "items": {"type": "string"}},
+                "risk": {"type": "integer", "minimum": 0, "maximum": 3},
+                "risk_reasons": {"type": "array", "items": {"type": "string"}},
+                "disposition": {"enum": ["reflow", "preserve_asset", "crop", "translate_embedded_text", "omit_approved", "needs_review"]},
+                "asset_ref": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "risk": {"type": "integer", "minimum": 0, "maximum": 3},
+          "risk_reasons": {"type": "array", "items": {"type": "string"}},
+          "review_status": {"enum": ["not_required", "pending", "reviewed", "exception_approved"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,7 @@
+include SKILL.md LICENSE THIRD_PARTY_NOTICES.md
+recursive-include references *.md *.json
+recursive-include assets *.md *.yaml
+recursive-include scripts *.py
+recursive-include tests *.py
+prune tests/.artifacts
+global-exclude *.py[cod] __pycache__ *.bak-*

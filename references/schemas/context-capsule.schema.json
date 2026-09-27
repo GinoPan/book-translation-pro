@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/context-capsule.schema.json",
+  "title": "Book Translation Pro Context Capsule",
+  "type": "object",
+  "required": ["schema_version", "unit_id", "book_node_id", "summary", "continuity", "entities", "cross_references", "unresolved"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "unit_id": {"type": "string"},
+    "book_node_id": {"type": "string"},
+    "incoming_capsule_ids": {"type": "array", "items": {"type": "string"}},
+    "summary": {"type": "string", "maxLength": 4000},
+    "continuity": {"type": "array", "items": {"type": "string", "maxLength": 500}},
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["glossary_id", "state"],
+        "properties": {"glossary_id": {"type": "string"}, "state": {"type": "string", "maxLength": 500}},
+        "additionalProperties": false
+      }
+    },
+    "cross_references": {"type": "array", "items": {"type": "string"}},
+    "visual_continuations": {"type": "array", "items": {"type": "string"}},
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["question", "source_refs"],
+        "properties": {
+          "question": {"type": "string"},
+          "source_refs": {"type": "array", "items": {"type": "string"}},
+          "confidence": {"enum": ["low", "medium", "high"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "book-translation-pro"
+version = "1.0.0"
+description = "Runtime-neutral, resumable whole-book translation and publication QA"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "PyYAML>=6.0",
+  "jsonschema>=4.0",
+  "beautifulsoup4>=4.12",
+  "PyMuPDF>=1.24",
+  "Pillow>=10.0",
+  "python-docx>=1.1",
+]
+
+[project.scripts]
+btp = "book_translation_pro.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "scripts"}
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+
+[tool.setuptools.data-files]
+"share/book-translation-pro" = ["SKILL.md", "LICENSE", "THIRD_PARTY_NOTICES.md"]
+"share/book-translation-pro/references" = ["references/*.md"]
+"share/book-translation-pro/references/schemas" = ["references/schemas/*.json"]
+"share/book-translation-pro/assets/project-template" = ["assets/project-template/book-project.yaml"]
+"share/book-translation-pro/assets/project-template/config" = ["assets/project-template/config/style-guide.md"]
+"share/book-translation-pro/assets/style-guides" = ["assets/style-guides/*.md"]
+
+[tool.unittest]
+start-directory = "tests"
+
+[tool.ruff]
+line-length = 100

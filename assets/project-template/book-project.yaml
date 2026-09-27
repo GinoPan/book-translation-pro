@@ -1,0 +1,96 @@
+schema_version: 2
+project_id: example-book
+
+source:
+  path: source/original.pdf
+  language: en
+  format: auto
+  edition: ""
+
+target:
+  language: zh-Hans
+  locale: zh-CN
+  script: Hans
+
+mode: study
+outputs:
+  - docx
+  - epub
+  - pdf
+
+workspace: .
+
+metadata:
+  title: Example Book
+  original_title: ""
+  author: ""
+  translator: ""
+
+execution:
+  runtime_adapter: auto
+  max_parallel: 8
+  max_attempts_per_unit: 2
+  keep_intermediates: true
+  checkpoints:
+    - terminology
+    - visual_exceptions
+
+chunking:
+  target_characters: 6000
+  hard_max_characters: 9000
+  prefer_section_boundaries: true
+
+terminology:
+  bootstrap_samples: 7
+  high_frequency_limit: 20
+  require_review_before_translation: true
+  libraries: []
+
+style_guide:
+  template: general
+
+context_capsule:
+  enabled: true
+  max_characters: 1800
+
+passes:
+  edit: true
+  visual_qa: true
+  completeness_qa: true
+
+visual:
+  renderer: auto
+  render_dpi: 180
+  minimum_review_risk: 2
+  minimum_text_characters: 20
+  thumbnail_width: 240
+  ocr_mode: auto
+  ocr_languages: []
+  embedded_text: review
+
+resume:
+  enabled: true
+  hash_algorithm: sha256
+
+publishing:
+  clean_extraction_artifacts: true
+  trim_width_mm: 170
+  trim_height_mm: 240
+  inside_margin_mm: 25
+  outside_margin_mm: 20
+  top_margin_mm: 22
+  bottom_margin_mm: 22
+  gutter_mm: 5
+  body_font_east_asia: 宋体
+  body_font_latin: Times New Roman
+  heading_font_east_asia: 黑体
+  heading_font_latin: Arial
+  body_font_size_pt: 10.5
+  line_spacing: 1.45
+  toc_depth: 2
+  bilingual_formats:
+    - markdown
+    - docx
+    - epub
+
+custom_instructions: []
