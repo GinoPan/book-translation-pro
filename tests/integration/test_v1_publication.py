@@ -39,14 +39,37 @@ class PublicationReleaseTests(unittest.TestCase):
             assert pandoc
             subprocess.run([str(pandoc), str(source_md), "--standalone", "-o", str(source)], check=True)
             project = root / "正式 项目"
-            initialize_project(source, project, "en", "en", "publication", ["docx", "epub", "bilingual"])
+            initialize_project(
+                source,
+                project,
+                "en",
+                "en",
+                "publication",
+                ["docx", "epub", "bilingual"],
+                rights_status="public-domain",
+                rights_basis="Public-domain integration fixture",
+                intended_use="publication",
+                redistribution_allowed=True,
+            )
             prepare_project(project)
             complete_fake_semantic_work(project)
             config, _ = load_resolved_project(project)
             candidate = typeset_preview(project, config)
-            self.assertEqual(candidate["publication_validation"]["checks"]["epubcheck"]["status"], "passed")
-            self.assertEqual(candidate["publication_validation"]["checks"]["bilingual_epub_epubcheck"]["status"], "passed")
-            self.assertTrue({"bilingual_markdown", "bilingual_docx", "bilingual_epub"}.issubset(candidate["generated"]))
+            checks = candidate["publication_validation"]["checks"]
+            self.assertEqual(checks["epubcheck"]["status"], "passed")
+            self.assertEqual(checks["bilingual_epub_epubcheck"]["status"], "passed")
+            bilingual_outputs = {"bilingual_markdown", "bilingual_docx", "bilingual_epub"}
+            self.assertTrue(bilingual_outputs.issubset(candidate["generated"]))
+            self.assertIn(
+                "# Copyright and Authorization",
+                (project / candidate["generated"]["markdown"]["path"]).read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "# Copyright and Authorization",
+                (project / candidate["generated"]["bilingual_markdown"]["path"]).read_text(
+                    encoding="utf-8"
+                ),
+            )
 
             review = __import__("json").loads(
                 (project / "qa" / "publication-review-template.json").read_text(encoding="utf-8")
@@ -55,7 +78,13 @@ class PublicationReleaseTests(unittest.TestCase):
             review_path = project / "qa" / "publication-review-input.json"
             atomic_write_json(review_path, review)
             record_publication_review(project, review_path)
-            record_review(project, "publication_signoff", True, "integration-test", "Rendered candidate approved")
+            record_review(
+                project,
+                "publication_signoff",
+                True,
+                "integration-test",
+                "Rendered candidate approved",
+            )
             qa = run_qa(project, config)
             self.assertTrue(qa["passed"], qa)
             final = build_outputs(project, config)
@@ -63,7 +92,10 @@ class PublicationReleaseTests(unittest.TestCase):
                 final["generated"]["epub"]["sha256"],
                 candidate["generated"]["epub"]["sha256"],
             )
-            self.assertEqual(sha256_file(project / "dist" / "book.epub"), candidate["generated"]["epub"]["sha256"])
+            self.assertEqual(
+                sha256_file(project / "dist" / "book.epub"),
+                candidate["generated"]["epub"]["sha256"],
+            )
             self.assertEqual(
                 sha256_file(project / "dist" / "book-bilingual.epub"),
                 candidate["generated"]["bilingual_epub"]["sha256"],

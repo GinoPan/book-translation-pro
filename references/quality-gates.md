@@ -45,6 +45,8 @@ Deterministic checks should also compare heading counts, image/table/formula ref
 
 ## Build gate
 
+- Reader-facing Markdown and generated DOCX, EPUB, PDF, and bilingual outputs contain the configured copyright and authorization notice; EPUB metadata carries the compact rights declaration.
+- Publication is blocked unless `rights.status` is `public-domain`, `licensed`, or `authorized`, `rights.redistribution_allowed` is true, and licensed/authorized projects record a non-empty `rights.basis`.
 - Merge order equals Book Map order.
 - Requested formats were actually generated and can be parsed/opened.
 - EPUB container, manifest, spine, navigation, language, resources, and note links are valid when EPUB is requested.

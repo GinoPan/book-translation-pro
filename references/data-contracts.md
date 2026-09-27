@@ -16,6 +16,8 @@ Read this before creating, validating, or migrating project artifacts.
 
 The user-facing file is `book-project.yaml`. V1.0 freezes project configuration and Run State at schema version 2. Resolve mode defaults, environment paths, and explicit overrides into `resolved-config.json`; validate against `schemas/project-config.schema.json`; hash the resolved JSON. Never resume under a different resolved hash without planning invalidation. Use `btp migrate` for version-1 projects; do not rewrite released state ad hoc. Optional `metadata.original_title` is the authoritative source-title line for a translated title page; conservative CIP inference is used only when it is absent.
 
+The resolved `rights` object records status, basis, intended use, redistribution permission, source-upload permission, attribution, notes, and whether generated outputs include the rights notice. Missing legacy declarations resolve to the conservative defaults `unknown`, `personal-study`, no redistribution, no source upload, and notice enabled. This record is a user declaration, not legal advice or rights certification. Changing it changes the resolved configuration hash and invalidates dependent publication evidence.
+
 ## Book Map
 
 `analysis/book-map.json` is the canonical whole-book logical order. It contains typed nodes for front matter, parts, chapters, appendices, notes, bibliography, index, and other preserved material. Each node links source pages/segments to target artifacts and visual/note references. Validate with `schemas/book-map.schema.json`.

@@ -16,11 +16,13 @@ from .manifest import load_manifest, validate_manifest_sources
 from .state import load_state, now_utc, save_state
 from .publication import (
     clean_markdown_for_publication,
+    prepare_publication_markdown,
     _replace_static_toc,
     _strip_print_artifacts,
     _strip_trailing_recovery_material,
     merge_edited_units,
 )
+from .rights import publication_rights_issues, rights_warning
 from .structure import IMAGE_RE
 from .figures import run_figure_audit
 from .visual import run_visual_qa
@@ -536,6 +538,8 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             suffix += f" [region {item['region_id']}]"
         _check(checks, item["id"], item["status"], item["message"] + suffix)
     if config["mode"] == "publication":
+        for issue in publication_rights_issues(config):
+            _check(checks, issue["id"], "fail", issue["message"])
         signoff = next(
             (item for item in state.get("human_reviews", []) if item["checkpoint"] == "publication_signoff"),
             None,
@@ -553,7 +557,7 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         else:
             try:
                 candidate = load_json(candidate_path)
-                current_clean = clean_markdown_for_publication(merge_edited_units(project, config))
+                current_clean, _ = prepare_publication_markdown(project, config)
                 current_hash = hashlib.sha256(current_clean.encode("utf-8")).hexdigest()
                 if candidate.get("status") != "review_candidate":
                     _check(checks, "publication.candidate", "fail", "Typeset candidate is not marked as a review candidate")
@@ -567,6 +571,11 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
                         _check(checks, "publication.format_warning", "warn", warning)
             except BTPError as exc:
                 _check(checks, "publication.candidate", "fail", f"Typeset candidate is invalid: {exc}")
+
+    else:
+        warning = rights_warning(config)
+        if warning:
+            _check(checks, "rights.declaration", "warn", warning)
 
     pending_reviews = [
         item["checkpoint"]

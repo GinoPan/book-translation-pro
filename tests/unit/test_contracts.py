@@ -18,6 +18,9 @@ def samples() -> dict[str, dict]:
             "schema_version": 2, "project_id": "sample", "source": {"path": "source/original.epub", "language": "en"},
             "target": {"language": "zh-Hans"}, "mode": "study", "outputs": ["epub"], "workspace": ".",
             "metadata": {"title": "示例书", "original_title": "Example Book"},
+            "rights": {"status": "unknown", "basis": "", "intended_use": "personal-study",
+                       "redistribution_allowed": False, "source_upload_allowed": False,
+                       "attribution": "", "notes": "", "include_notice_in_outputs": True},
         },
         "book-map.schema.json": {
             "schema_version": 1, "source_fingerprint": digest, "root_ids": ["chapter-1"],

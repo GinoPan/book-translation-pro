@@ -15,6 +15,7 @@ Build a faithful, readable target-language edition without losing book structure
 - Give every durable object a stable ID and every reusable result a content/dependency hash. Never infer freshness from modification time alone.
 - Never merge or publish when required chunks, mapped sections, assets, notes, or QA gates are missing.
 - Preserve user instructions and authorization boundaries. Do not obtain, distribute, or upload source books beyond the user's requested local workflow.
+- Treat copyright status, translation authority, source-upload permission, and redistribution permission as separate questions. Record the user's declaration without presenting it as legal advice or rights certification.
 - Use runtime-neutral language. Discover the host's parallel-worker mechanism when available and fall back to sequential execution when it is not.
 
 ## Route the request
@@ -26,6 +27,7 @@ Build a faithful, readable target-language edition without losing book structure
 5. Before declaring a stage or book complete, read [quality-gates.md](references/quality-gates.md).
 6. When adapting installation, commands, or parallel work to a host runtime, read [runtime-compatibility.md](references/runtime-compatibility.md).
 7. Before generating review or final book files, read [publication-output.md](references/publication-output.md).
+8. Before initializing a project, sending source content outside the local workflow, or preparing distribution-ready files, read [copyright-and-rights.md](references/copyright-and-rights.md).
 
 Read only the references required for the current task.
 
@@ -39,8 +41,9 @@ Infer these from the request and local context when safe:
 - Requested output formats
 - Project workspace path
 - User terminology or style constraints
+- Rights status, intended use, redistribution permission, source-upload permission, and a concise authorization basis when applicable
 
-Ask only when a missing value would materially change the result. Before expensive translation, visual processing, or publication work, present the resolved configuration and any configured review checkpoint.
+Ask only when a missing value would materially change the result. Unknown rights may proceed only as a warned local Fast/Study workflow. Publication requires a recorded `public-domain`, `licensed`, or `authorized` status plus explicit redistribution permission; licensed or authorized publication also requires a non-empty basis. Before expensive translation, visual processing, or publication work, present the resolved configuration, rights declaration, and any configured review checkpoint.
 
 ## Deterministic entry point
 
@@ -77,3 +80,5 @@ For CHM or table-heavy sources, use `check-tables <project-dir>` before a long b
 - Publication mode requires an approved current signoff and an external EPUBCheck pass when EPUB is requested
 - The final visual pass checks the cover, TOC, running heads/feet, representative figures, risk tables, and dense tables after rendering—not only the source Markdown
 - Known limitations and skipped human reviews are reported explicitly
+- Fast/Study projects with unknown or non-redistributable rights remain visibly marked for local use; Publication is blocked without a qualifying rights status and explicit redistribution permission
+- Reader-facing outputs include the generated rights notice unless an equivalent reviewed notice is explicitly configured

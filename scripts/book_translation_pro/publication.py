@@ -32,6 +32,7 @@ from .artifacts import (
 )
 from .manifest import load_manifest
 from .runtime import epubcheck_command, find_binary
+from .rights import insert_rights_notice, rights_metadata_text
 
 
 PRINT_MARKER_RE = re.compile(
@@ -2496,6 +2497,29 @@ def _insert_original_title_line(
     return markdown.replace(heading + "\n", heading + "\n\n*" + original + "*\n", 1)
 
 
+def prepare_publication_markdown(
+    project: Path,
+    config: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Build the deterministic Markdown master, including its rights page."""
+    raw = merge_edited_units(project, config)
+    clean = clean_markdown_for_publication(raw)
+    options = _publication_options(config)
+    if options["folio_position"] == "auto":
+        options["folio_position"] = detect_folio_position(project, config)
+    options["title"] = _infer_target_title(
+        clean, options["title"], config["target"]["language"]
+    )
+    clean = _insert_original_title_line(
+        clean,
+        options["title"],
+        str(config["target"]["language"]),
+        str(config.get("metadata", {}).get("original_title", "")),
+    )
+    clean = insert_rights_notice(clean, config)
+    return clean, options
+
+
 def _repair_epub_note_backlinks(epub_path: Path) -> int:
     """Re-insert footnote backlinks that Pandoc's HTML→EPUB pass drops.
 
@@ -2552,19 +2576,8 @@ def _repair_epub_note_backlinks(epub_path: Path) -> int:
 def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> dict[str, Path]:
     """Create cleaned, publication-oriented outputs without changing run state."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw = merge_edited_units(project, config)
-    clean = clean_markdown_for_publication(raw)
+    clean, options = prepare_publication_markdown(project, config)
     _restore_promoted_image_assets(project, clean)
-    options = _publication_options(config)
-    if options["folio_position"] == "auto":
-        options["folio_position"] = detect_folio_position(project, config)
-    options["title"] = _infer_target_title(clean, options["title"], config["target"]["language"])
-    clean = _insert_original_title_line(
-        clean,
-        options["title"],
-        str(config["target"]["language"]),
-        str(config.get("metadata", {}).get("original_title", "")),
-    )
     markdown_path = output_dir / "book.md"
     atomic_write_text(markdown_path, clean)
 
@@ -2574,10 +2587,18 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
     title = options["title"]
     author = config.get("metadata", {}).get("author", "")
     lang = config["target"]["language"]
-    metadata_args = [f"--metadata=title:{title}", f"--metadata=lang:{lang}"]
+    metadata_args = [
+        f"--metadata=title:{title}",
+        f"--metadata=lang:{lang}",
+        f"--metadata=rights:{rights_metadata_text(config)}",
+    ]
     if str(author).strip():
         metadata_args.append(f"--metadata=author:{author}")
-    bilingual_metadata_args = [f"--metadata=title:{title} — bilingual", f"--metadata=lang:{lang}"]
+    bilingual_metadata_args = [
+        f"--metadata=title:{title} — bilingual",
+        f"--metadata=lang:{lang}",
+        f"--metadata=rights:{rights_metadata_text(config)}",
+    ]
     if str(author).strip():
         bilingual_metadata_args.append(f"--metadata=author:{author}")
     common = [
@@ -2651,6 +2672,8 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
         alignment = create_segment_alignment(project, config)
         bilingual_markdown = output_dir / "book-bilingual.md"
         render_bilingual_markdown(alignment, bilingual_markdown)
+        bilingual_text = bilingual_markdown.read_text(encoding="utf-8")
+        atomic_write_text(bilingual_markdown, insert_rights_notice(bilingual_text, config))
         generated["bilingual_markdown"] = bilingual_markdown
         bilingual_formats = set(config.get("publishing", {}).get("bilingual_formats", ["markdown", "docx", "epub"]))
         bilingual_xhtml = project / "target" / "xhtml" / "book-bilingual.xhtml"

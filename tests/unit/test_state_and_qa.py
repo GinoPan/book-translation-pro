@@ -177,6 +177,31 @@ class StateTests(unittest.TestCase):
             self.assertFalse(report["passed"])
             self.assertIn("content.numbers", [item["id"] for item in report["checks"]])
 
+    def test_publication_qa_blocks_unconfirmed_distribution_rights(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _ = make_project(root)
+            config = {**config, "mode": "publication"}
+            report = run_qa(root, config)
+            rights_failures = [
+                item for item in report["checks"]
+                if item["id"].startswith("rights.")
+            ]
+            self.assertEqual(len(rights_failures), 2)
+            self.assertTrue(all(item["status"] == "fail" for item in rights_failures))
+            self.assertEqual(
+                {item["id"] for item in rights_failures},
+                {"rights.publication_status", "rights.redistribution"},
+            )
+
+    def test_study_qa_warns_when_rights_are_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _ = make_project(root)
+            report = run_qa(root, config)
+            warning = next(item for item in report["checks"] if item["id"] == "rights.declaration")
+            self.assertEqual(warning["status"], "warn")
+
     def test_qa_ignores_translated_punctuation_after_url(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

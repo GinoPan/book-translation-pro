@@ -26,6 +26,17 @@ metadata:
   author: ""
   translator: ""
 
+# Record the user's declaration; this is not legal advice or rights certification.
+rights:
+  status: unknown
+  basis: ""
+  intended_use: personal-study
+  redistribution_allowed: false
+  source_upload_allowed: false
+  attribution: ""
+  notes: ""
+  include_notice_in_outputs: true
+
 execution:
   runtime_adapter: auto
   max_parallel: 8

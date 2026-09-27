@@ -47,6 +47,30 @@
       },
       "additionalProperties": false
     },
+    "rights": {
+      "type": "object",
+      "required": [
+        "status",
+        "basis",
+        "intended_use",
+        "redistribution_allowed",
+        "source_upload_allowed",
+        "attribution",
+        "notes",
+        "include_notice_in_outputs"
+      ],
+      "properties": {
+        "status": {"enum": ["unknown", "public-domain", "licensed", "authorized", "personal-research"]},
+        "basis": {"type": "string"},
+        "intended_use": {"enum": ["personal-study", "internal-research", "publication", "commercial"]},
+        "redistribution_allowed": {"type": "boolean"},
+        "source_upload_allowed": {"type": "boolean"},
+        "attribution": {"type": "string"},
+        "notes": {"type": "string"},
+        "include_notice_in_outputs": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "execution": {
       "type": "object",
       "properties": {

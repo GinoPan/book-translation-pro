@@ -10,9 +10,11 @@ import yaml
 
 from .artifacts import BTPError, atomic_write_json, atomic_write_text, hash_data, load_json, validate_schema
 from .migration import CURRENT_CONFIG_SCHEMA, migrate_config_data
+from .rights import DEFAULT_RIGHTS
 
 
 COMMON_DEFAULTS: dict[str, Any] = {
+    "rights": DEFAULT_RIGHTS,
     "execution": {
         "runtime_adapter": "auto",
         "max_parallel": 8,

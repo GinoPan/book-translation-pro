@@ -4,7 +4,7 @@ Read this reference for project setup, planning, implementation, or an eventual 
 
 ## Stage graph
 
-1. **Collect** — resolve source, target language, mode, outputs, workspace, user constraints, and review checkpoints.
+1. **Collect** — resolve source, target language, mode, outputs, workspace, user constraints, rights status, intended use, source-upload and redistribution permissions, and review checkpoints.
 2. **Capability scan** — detect required and optional local tools; decide run, degrade, or block.
 3. **Initialize** — copy the project template, fingerprint the source, resolve configuration, and create the artifact directories.
 4. **Profile** — identify format, length, language, extractability, sections, assets, scan/OCR status, columns, tables, formulas, and risk. For CHM, record thumbnail-to-full-resolution image promotions and verify that the publication asset directory contains the promoted files.
@@ -33,10 +33,10 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
    For an existing schema-v1 project, run `BTP migrate <project-dir>` once before `prepare`, `plan`, or `qa`. The migration receipt is retained under `state/migrations/`.
 
-2. Create a project when one does not already exist:
+2. Create a project when one does not already exist. Record the user's rights declaration; `unknown` is safe for a warned local Study project, while a distribution-ready Publication project requires a qualifying status and explicit redistribution permission:
 
    ```text
-   BTP init <source.pdf|source.docx|source.epub|source.chm> --project <project-dir> --target <language> --mode study --output docx --output epub --output pdf --style-template academic
+   BTP init <source.pdf|source.docx|source.epub|source.chm> --project <project-dir> --target <language> --mode study --output docx --output epub --output pdf --style-template academic --rights-status personal-research --intended-use personal-study
    ```
 
    Available Style Guide templates are `general`, `academic`, `technical`, and `business`. Reusable terminology-library paths are declared in `terminology.libraries`; they are applied in listed order and the project Glossary wins conflicts.

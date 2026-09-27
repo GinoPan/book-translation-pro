@@ -18,6 +18,7 @@ from .glossary import load_glossary, save_glossary, select_entries, validate_glo
 from .manifest import load_manifest
 from .migration import migrate_project
 from .project import initialize_project, prepare_project, visualize_project
+from .rights import INTENDED_USES, RIGHTS_STATUSES, rights_config, rights_warning
 from .publication import publication_table_inventory
 from .publication_review import create_review_template, record_publication_review
 from .qa import run_qa
@@ -116,6 +117,11 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
         "incoming_capsule": incoming,
         "glossary_entries": selected,
         "custom_instructions": config.get("custom_instructions", []),
+        "rights": rights_config(config),
+        "data_handling": (
+            "Keep source content local and do not send it to an external service "
+            "unless rights.source_upload_allowed is true."
+        ),
         "source_page_indices": entry.get("page_indices", []),
         "visual_evidence": [],
         "expected": {
@@ -154,7 +160,7 @@ def status_report(project: Path) -> dict[str, Any]:
     qa_path = project / "qa" / "completeness.json"
     build_path = project / "qa" / "build.json"
     visual_path = project / "qa" / "visual.json"
-    return {
+    report = {
         "schema_version": 1,
         "project_id": config["project_id"],
         "mode": config["mode"],
@@ -167,6 +173,11 @@ def status_report(project: Path) -> dict[str, Any]:
         "visual_qa": load_json(visual_path) if visual_path.is_file() else None,
         "build": load_json(build_path) if build_path.is_file() else None,
     }
+    report["rights"] = rights_config(config)
+    warning = rights_warning(config)
+    if warning:
+        report["rights_warning"] = warning
+    return report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -193,9 +204,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--output", dest="outputs", action="append", choices=("markdown", "docx", "epub", "pdf", "bilingual"))
     p_init.add_argument("--project-id")
     p_init.add_argument("--style-template", choices=("general", "academic", "technical", "business"), default="general")
+    p_init.add_argument("--rights-status", choices=RIGHTS_STATUSES, default="unknown")
+    p_init.add_argument("--rights-basis", default="")
+    p_init.add_argument("--intended-use", choices=INTENDED_USES)
+    p_init.add_argument("--redistribution-allowed", action="store_true")
+    p_init.add_argument("--source-upload-allowed", action="store_true")
+    p_init.add_argument("--rights-attribution", default="")
     p_init.set_defaults(handler=lambda args: initialize_project(
         Path(args.source), Path(args.project), args.target, args.source_language, args.mode,
-        args.outputs or ["docx", "epub", "pdf"], args.project_id, args.style_template
+        args.outputs or ["docx", "epub", "pdf"], args.project_id, args.style_template,
+        args.rights_status, args.rights_basis, args.intended_use,
+        args.redistribution_allowed, args.source_upload_allowed, args.rights_attribution,
     ))
 
     p_prepare = sub.add_parser("prepare", help="Extract, map, chunk, and initialize state")

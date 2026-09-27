@@ -26,6 +26,7 @@ from .config import resolve_project, write_yaml
 from .glossary import empty_glossary, load_effective_glossary, load_glossary, render_review, save_glossary
 from .ingest import SUPPORTED_SUFFIXES, convert_to_markdown, source_format
 from .manifest import create_manifest
+from .rights import DEFAULT_RIGHTS, rights_warning
 from .state import empty_record, initialize_state, load_state, now_utc, save_state
 from .structure import draft_book_map, expand_long_segments, make_work_units, parse_blocks, profile_markdown
 from .visual import augment_markdown_with_scanned_page_ocr, prepare_visual
@@ -79,6 +80,12 @@ def initialize_project(
     outputs: list[str],
     project_id: str | None = None,
     style_template: str = "general",
+    rights_status: str = "unknown",
+    rights_basis: str = "",
+    intended_use: str | None = None,
+    redistribution_allowed: bool = False,
+    source_upload_allowed: bool = False,
+    rights_attribution: str = "",
 ) -> dict[str, Any]:
     source = normalize_path(source)
     if not source.is_file():
@@ -110,6 +117,17 @@ def initialize_project(
         "outputs": outputs,
         "workspace": ".",
         "metadata": {"title": source.stem, "author": "", "translator": ""},
+        "rights": {
+            **DEFAULT_RIGHTS,
+            "status": rights_status,
+            "basis": rights_basis,
+            "intended_use": intended_use or (
+                "publication" if mode == "publication" else "personal-study"
+            ),
+            "redistribution_allowed": redistribution_allowed,
+            "source_upload_allowed": source_upload_allowed,
+            "attribution": rights_attribution,
+        },
         "terminology": {"libraries": []},
         "style_guide": {"template": style_template},
         "custom_instructions": [],
@@ -135,7 +153,17 @@ def initialize_project(
     }
     atomic_write_json(project / "source" / "source-fingerprint.json", fingerprint)
     resolved, config_hash = resolve_project(project)
-    return {"project": str(project), "project_id": resolved["project_id"], "source_fingerprint": source_hash, "resolved_config_hash": config_hash}
+    result = {
+        "project": str(project),
+        "project_id": resolved["project_id"],
+        "source_fingerprint": source_hash,
+        "resolved_config_hash": config_hash,
+        "rights": resolved["rights"],
+    }
+    warning = rights_warning(resolved)
+    if warning:
+        result["rights_warning"] = warning
+    return result
 
 
 def _clear_derived(project: Path) -> None:

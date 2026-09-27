@@ -95,7 +95,9 @@ btp init D:/Books/source.pdf \
   --output docx \
   --output epub \
   --output pdf \
-  --style-template general
+  --style-template general \
+  --rights-status personal-research \
+  --intended-use personal-study
 
 btp prepare D:/Books/source-zh
 btp plan D:/Books/source-zh
@@ -154,6 +156,7 @@ Fast 模式也不会允许省略内容。三种模式都要求源文件指纹、
 - [数据契约](references/data-contracts.md)
 - [质量门禁](references/quality-gates.md)
 - [出版输出](references/publication-output.md)
+- [版权与权利保护](references/copyright-and-rights.md)
 - [运行时兼容性](references/runtime-compatibility.md)
 
 ## 开发与测试
@@ -171,4 +174,32 @@ python -m pytest -q
 
 代码以 [MIT License](LICENSE) 发布。第三方组件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-使用本工具时，请确保你对源书拥有合法的读取、翻译和分发权限。源书内容默认只在用户指定的本地工作流中处理。
+翻译通常属于对原作的衍生使用。合法持有一本书，并不必然意味着拥有翻译、复制、公开发布或商业分发的权利。使用者应根据作品状态、授权文件和适用法律确认自己的权限；本工具记录使用者的声明，但不提供法律意见或权利认证。
+
+每个项目都会记录：
+
+- 权利状态：未知、公版、已许可、已授权或个人研究声明
+- 用途：个人学习、内部研究、公开发布或商业使用
+- 是否允许再分发译文
+- 是否允许将源文件上传到外部服务
+- 授权依据、署名要求和补充说明
+
+默认配置是“权利状态未知、禁止再分发、禁止上传源文件”。Fast 和 Study 模式可以在本地继续，但会持续显示警告。Publication 模式只有在状态为 `public-domain`、`licensed` 或 `authorized`，并明确允许再分发时才能通过；已许可或已授权项目还必须填写授权依据。
+
+最终 Markdown、DOCX、EPUB、PDF 和双语版默认包含自动生成的“版权与授权”页，EPUB 元数据也会写入简要权利声明。完整规则见[版权与权利保护](references/copyright-and-rights.md)。
+
+一个允许发布的初始化示例：
+
+```bash
+btp init D:/Books/source.epub \
+  --project D:/Books/source-zh \
+  --target zh-CN \
+  --mode publication \
+  --rights-status authorized \
+  --rights-basis "Written authorization dated 2026-09-27" \
+  --intended-use publication \
+  --redistribution-allowed \
+  --rights-attribution "Original author and publisher"
+```
+
+除非权利声明明确允许，源书、页面图像、OCR 结果和完整译文都不应上传到外部服务，也不应提交到公开仓库。
