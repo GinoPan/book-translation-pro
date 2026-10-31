@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .artifacts import BTPError, atomic_write_json, atomic_write_text, external_tool_path, portable_path, safe_project_path
-from .pdf_text import clean_pdf, extract_markdown, heading_lines, promote_headings, restore_layout_markup
+from .pdf_text import clean_pdf, extract_markdown, missing_source_text, promote_headings, restore_layout_markup
 from .runtime import find_binary
 
 
@@ -369,11 +369,18 @@ def convert_to_markdown(project: Path, config: dict[str, Any]) -> tuple[Path, di
             markdown, conversion = _convert_pdf_with_pymupdf(project, source, f"Calibre/Pandoc conversion failed: {exc}", cleaned)
     text, restored = restore_layout_markup(markdown.read_text(encoding="utf-8"), layout)
     if conversion["extractor"] != "pymupdf":
-        text, conversion["pdf_headings_promoted"] = promote_headings(text, heading_lines(cleaned))
+        text, conversion["pdf_headings_promoted"] = promote_headings(text, layout["headings"])
     atomic_write_text(markdown, text)
     missing_tokens = restored.pop("missing_tokens")
-    conversion["pdf_layout"] = {**layout["stats"], **restored}
+    shortfall = missing_source_text(source, text, layout)
+    conversion["pdf_layout"] = {**layout["stats"], **restored, **shortfall}
     conversion["layout_warnings"] = list(layout["warnings"])
+    if shortfall["missing_characters"]:
+        conversion["layout_warnings"].append(
+            f"{shortfall['missing_characters']} letters or digits of the PDF text layer are missing from the "
+            f"working draft (words not found: {', '.join(shortfall['words_not_found']) or 'none whole'}); "
+            "compare the draft with the rendered pages"
+        )
     if missing_tokens:
         conversion["layout_warnings"].append(
             "Converted text lost layout placeholders; these were appended at the end of the working draft: "

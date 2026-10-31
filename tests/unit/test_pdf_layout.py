@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 import tempfile
+from collections import Counter
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from book_translation_pro.artifacts import BTPError, load_json
-from book_translation_pro.pdf_text import clean_pdf, promote_headings, restore_layout_markup
+from book_translation_pro.pdf_text import _has_header, _pipe_table, clean_pdf, promote_headings, restore_layout_markup
 from book_translation_pro.project import initialize_project, prepare_project
 
 PAGE_WIDTH, PAGE_HEIGHT = 420, 600
@@ -175,6 +176,12 @@ class RestoreLayout(unittest.TestCase):
         self.assertIn("1 Source note.", restored)
         self.assertIn("| 1 | 2 |", restored)
 
+    def test_page_break_join_keeps_link_targets(self) -> None:
+        markdown = 'See [the note](#calibre_link-7).\n\nA loose belt could stop for ho-\n\n<a id="calibre_link-7"></a>\n\nurs when a belt slipped.\n'
+        restored, stats = restore_layout_markup(markdown, {**self.RECORD, "footnotes": {}, "tables": {}})
+        self.assertEqual(stats["page_breaks_joined"], 1)
+        self.assertIn('A loose belt could stop for hours when a belt slipped.\n\n<a id="calibre_link-7"></a>', restored)
+
     def test_cjk_page_break_joins_without_a_space(self) -> None:
         record = {"tables": {}, "footnotes": {}, "page_breaks": [{"page": 2, "tail": "工厂的节奏", "head": "从未改变"}]}
         restored, stats = restore_layout_markup("每天早上工厂的节奏\n\n从未改变。\n", record)
@@ -206,6 +213,7 @@ class PreparedLayout(unittest.TestCase):
             conversion = load_json(project / "analysis" / "book-profile.json")["conversion"]
             self.assertEqual(conversion["pdf_layout"]["page_breaks_joined"], 1)
             self.assertEqual(conversion["layout_warnings"], [])
+            self.assertEqual(conversion["pdf_layout"]["missing_characters"], 0)
 
     def test_page_map_marks_running_heads_and_folios_instead_of_footnotes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -221,6 +229,39 @@ class PreparedLayout(unittest.TestCase):
             furniture = [region for page in pages for region in page["regions"] if region["role"] in {"header", "page_number"}]
             self.assertTrue(all(region["risk"] == 0 and region["disposition"] == "omit_approved" for region in furniture))
 
+    def test_page_map_does_not_claim_cleaning_on_a_restored_page(self) -> None:
+        import fitz
+
+        def greedy(rect):
+            return fitz.Rect(rect.x0, rect.y0, rect.x1 + 300, rect.y1 + 40)
+
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("book_translation_pro.pdf_text._inner", side_effect=greedy):
+                project, _markdown = prepare_layout_book(Path(temp))
+            warnings = load_json(project / "source-work" / "extracted" / "pdf-layout.json")["warnings"]
+            restored_pages = {
+                int(re.match(r"Layout cleaning was undone on page (\d+):", warning).group(1))
+                for warning in warnings if warning.startswith("Layout cleaning was undone")
+            }
+            self.assertIn(2, restored_pages)
+            for page in load_json(project / "analysis" / "page-map.json")["pages"]:
+                if page["page_index"] in restored_pages:
+                    roles = {region["role"] for region in page["regions"]}
+                    self.assertFalse(roles & {"header", "page_number"}, page["page_index"])
+
+    def test_lost_source_text_is_reported_after_conversion(self) -> None:
+        def lose_a_sentence(markdown, record):
+            restored, stats = restore_layout_markup(markdown, record)
+            return restored.replace("The ledger recorded the result.", ""), stats
+
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("book_translation_pro.ingest.restore_layout_markup", side_effect=lose_a_sentence):
+                project, _markdown = prepare_layout_book(Path(temp))
+            conversion = load_json(project / "analysis" / "book-profile.json")["conversion"]
+            self.assertEqual(conversion["pdf_layout"]["missing_characters"], len("Theledgerrecordedtheresult"))
+            self.assertEqual(conversion["pdf_layout"]["words_not_found"], ["recorded", "result"])
+            self.assertTrue(any("missing from the working draft" in warning for warning in conversion["layout_warnings"]))
+
     def test_scanned_pdf_without_text_layer_still_prepares(self) -> None:
         import fitz
 
@@ -234,3 +275,129 @@ class PreparedLayout(unittest.TestCase):
             record = clean_pdf(root / "scan.pdf", root / "clean.pdf")
             self.assertEqual((record["tables"], record["footnotes"], record["figures"]), ({}, {}, []))
             self.assertTrue((root / "clean.pdf").is_file())
+
+
+class DestructiveRulesNeedTwoSignals(unittest.TestCase):
+    """Text that only looks like page furniture must survive cleaning."""
+
+    def test_poems_epigraphs_and_roman_letter_words_are_kept(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = fitz.open()
+            for number in range(1, 5):
+                page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+                for line in range(8):  # a stanza starting inside the top band, set at 0.9 x body
+                    page.insert_text((60, 36 + line * 14), f"Stanza line {line + 1} of poem {number}, the river and the field", fontsize=9)
+                page.insert_textbox(fitz.Rect(40, 200, 380, 400), SENTENCE * 4, fontsize=10)
+            document[1].insert_text((60, 20), "Small epigraph above the poem", fontsize=8)
+            document[2].insert_text((200, 585), "civil", fontsize=10)
+            document[0].insert_text((205, 22), "2", fontsize=10)  # a lone section number
+            document[3].insert_text((190, 585), "1998", fontsize=10)  # a lone year
+            for index, folio in ((1, "xii"), (2, "xiii"), (3, "xiv")):  # front-matter folios advance with the page
+                document[index].insert_text((360, 585), folio, fontsize=8)
+            document.save(root / "poems.pdf")
+            document.close()
+            record = clean_pdf(root / "poems.pdf", root / "clean.pdf")
+            self.assertEqual([(item["page"], item["kind"], item["text"]) for item in record["removed"]], [
+                (2, "page_number", "xii"), (3, "page_number", "xiii"), (4, "page_number", "xiv"),
+            ])
+            self.assertEqual(record["warnings"], [])
+            with fitz.open(root / "clean.pdf") as cleaned:
+                text = "\n".join(page.get_text() for page in cleaned)
+            for number in range(1, 5):
+                self.assertIn(f"Stanza line 1 of poem {number}", text)
+            for kept in ("Small epigraph above the poem", "civil", "\n2\n", "1998"):
+                self.assertIn(kept, text)
+
+    def test_numbered_labels_at_page_tops_are_not_running_heads(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = fitz.open()
+            for problem in (7, 9, 12, 13):  # numbers that do not advance with the page
+                page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+                page.insert_text((40, 30), f"Problem {problem}", fontsize=10)
+                page.insert_textbox(fitz.Rect(40, 80, 380, 300), SENTENCE * 4, fontsize=10)
+            document.save(root / "workbook.pdf")
+            document.close()
+            record = clean_pdf(root / "workbook.pdf", root / "clean.pdf")
+            self.assertEqual(record["removed"], [])
+
+    def test_removal_log_records_every_deleted_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            make_layout_pdf(root / "book.pdf")
+            record = clean_pdf(root / "book.pdf", root / "clean.pdf")
+            kinds = Counter(item["kind"] for item in record["removed"])
+            self.assertEqual(kinds["header"] + kinds["page_number"], record["stats"]["furniture_lines_removed"])
+            entries = [(item["page"], item["kind"], item["text"]) for item in record["removed"]]
+            self.assertIn((2, "header", "A HISTORY OF WORK"), entries)
+            self.assertIn((3, "figure_label", "gearbox"), entries)
+            self.assertIn((2, "footnote", "1 Source: factory ledger, 1998, p. 42."), entries)
+            self.assertIn((2, "footnote_marker", "1"), entries)
+            self.assertIn((4, "table", "1,450"), entries)
+            self.assertTrue(all(len(item["bbox"]) == 4 for item in record["removed"]))
+
+    def test_page_n_of_m_footers_are_running_feet(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = fitz.open()
+            for number in range(1, 5):
+                page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+                page.insert_textbox(fitz.Rect(40, 80, 380, 300), SENTENCE * 4, fontsize=10)
+                page.insert_text((170, 585), f"Page {number} of 120", fontsize=8)
+            document.save(root / "report.pdf")
+            document.close()
+            record = clean_pdf(root / "report.pdf", root / "clean.pdf")
+            self.assertEqual([item["text"] for item in record["removed"]], [f"Page {number} of 120" for number in range(1, 5)])
+
+    def test_page_is_restored_when_removed_text_does_not_balance(self) -> None:
+        import fitz
+
+        def greedy(rect):  # a redaction box that also cuts into the body text below
+            return fitz.Rect(rect.x0, rect.y0, rect.x1 + 300, rect.y1 + 40)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            make_layout_pdf(root / "book.pdf")
+            with patch("book_translation_pro.pdf_text._inner", side_effect=greedy):
+                record = clean_pdf(root / "book.pdf", root / "clean.pdf")
+            self.assertTrue(any(warning.startswith("Layout cleaning was undone on page 2:") for warning in record["warnings"]))
+            self.assertFalse(any(item["page"] == 2 for item in record["removed"]))
+            self.assertFalse(any(note["page"] == 2 for note in record["footnotes"].values()))
+            with fitz.open(root / "book.pdf") as original, fitz.open(root / "clean.pdf") as cleaned:
+                self.assertEqual(cleaned[1].get_text(), original[1].get_text())
+            self.assertEqual(record["stats"]["pages_restored_unchanged"], len([w for w in record["warnings"] if w.startswith("Layout cleaning was undone")]))
+
+    def test_table_whose_cells_disagree_with_the_page_is_left_as_text(self) -> None:
+        import fitz
+
+        extract = fitz.table.Table.extract
+
+        def drop_a_cell(table):
+            rows = extract(table)
+            rows[2][1] = ""
+            return rows
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            make_layout_pdf(root / "book.pdf")
+            with patch.object(fitz.table.Table, "extract", drop_a_cell):
+                record = clean_pdf(root / "book.pdf", root / "clean.pdf")
+            self.assertEqual(record["tables"], {})
+            self.assertTrue(any(warning.startswith("Table on page 4 left as text") for warning in record["warnings"]))
+            with fitz.open(root / "clean.pdf") as cleaned:
+                self.assertIn("1,450", cleaned[3].get_text())
+
+    def test_headerless_tables_get_an_empty_header_row(self) -> None:
+        data = [["1998", "1,200"], ["1999", "1,450"]]
+        self.assertFalse(_has_header(data, []))
+        self.assertEqual(_pipe_table(data, False), "|  |  |\n|---|---|\n| 1998 | 1,200 |\n| 1999 | 1,450 |")
+        self.assertTrue(_has_header([["Year", "Units"], ["1998", "1,200"]], []))
+        self.assertFalse(_has_header([["Apples", "red"], ["Lemons", "yellow"]], []))
+        self.assertTrue(_has_header([["Fruit", "Colour"], ["Lemons", "yellow"]], [{"text": "Fruit", "flags": 16}, {"text": "Colour", "flags": 16}]))

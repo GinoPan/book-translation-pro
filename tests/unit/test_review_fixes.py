@@ -16,7 +16,7 @@ from book_translation_pro.cli import show_unit
 from book_translation_pro.config import load_resolved_project, load_yaml, write_yaml
 from book_translation_pro.glossary import save_glossary, select_entries
 from book_translation_pro.ingest import simplify_html_tables, strip_wrapper_divs
-from book_translation_pro.pdf_text import extract_markdown, heading_lines, promote_headings
+from book_translation_pro.pdf_text import clean_pdf, extract_markdown, promote_headings
 from book_translation_pro.manifest import load_manifest
 from book_translation_pro.project import initialize_project, prepare_project, visualize_project
 from book_translation_pro.qa import run_qa
@@ -321,7 +321,8 @@ class PdfStructure(unittest.TestCase):
                 '<span class="calibre3">Origins of the Factory</span>\n\n'
                 "The operators reviewed the station.\n\n**1.1 Daily Lessons**\n\n```\nThe Night Shift\n```\n"
             )
-            promoted, count = promote_headings(calibre_like, heading_lines(root / "book.pdf"))
+            headings = clean_pdf(root / "book.pdf", root / "clean.pdf")["headings"]
+            promoted, count = promote_headings(calibre_like, headings)
             self.assertEqual(count, 2)
             self.assertIn("# Origins of the Factory\n", promoted)
             self.assertIn("## 1.1 Daily Lessons\n", promoted)

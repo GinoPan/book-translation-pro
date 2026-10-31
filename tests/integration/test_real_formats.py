@@ -252,6 +252,8 @@ class RealPdfLayoutTests(unittest.TestCase):
             project, markdown = prepare_layout_book(Path(temp), calibre=True)
             conversion = load_json(project / "analysis" / "book-profile.json")["conversion"]
             self.assertEqual(conversion["extractor"], "calibre")
+            self.assertEqual(conversion["pdf_layout"]["missing_characters"], 0, conversion["layout_warnings"])
+            self.assertEqual(conversion["layout_warnings"], [])
             self.assertNotIn("A HISTORY OF WORK", markdown)
             self.assertEqual(markdown.count("Engines of Change"), 1)
             self.assertIn("The ledger recorded the result.[^fn1]\n\n[^fn1]: Source: factory ledger, 1998, p. 42.\n", markdown)
@@ -279,5 +281,7 @@ class RealPdfLayoutTests(unittest.TestCase):
             result = prepare_project(root / "project")
             self.assertFalse(any("PyMuPDF fallback" in warning for warning in result["warnings"]), result["warnings"])
             markdown = (root / "project" / "source-work" / "extracted" / "input.md").read_text(encoding="utf-8")
-            self.assertNotIn("THE MACHINE AGE", markdown)
             self.assertEqual(markdown.count("body text sits here"), 32)
+            # Each head repeats on only two pages, below the three-page evidence threshold,
+            # so cleaning leaves them in place rather than risk deleting body text.
+            self.assertEqual(markdown.count("THE MACHINE AGE"), 2)

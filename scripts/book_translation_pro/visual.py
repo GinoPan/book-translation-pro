@@ -457,9 +457,13 @@ def prepare_visual(
         for unit in units
     }
     page_units, unit_pages = align_pages_to_units(page_texts, unit_texts)
-    from .pdf_text import page_furniture  # pdf_text builds on this module
-
-    furniture = page_furniture(source)
+    # Page furniture roles come from what pdf_text.clean_pdf actually removed,
+    # so a page it put back unchanged is not reported as cleaned.
+    layout_record = project / "source-work" / "extracted" / "pdf-layout.json"
+    furniture: dict[int, dict[tuple[float, ...], str]] = {}
+    for item in load_json(layout_record).get("removed", []) if layout_record.is_file() else []:
+        if item["kind"] in {"header", "footer", "page_number"}:
+            furniture.setdefault(item["page"], {})[tuple(item["bbox"])] = item["kind"]
     unit_segments = {unit["id"]: unit["segment_ids"] for unit in units}
     asset_records: list[dict[str, Any]] = []
     minimum_text = int(config["visual"].get("minimum_text_characters", 20))
@@ -483,7 +487,7 @@ def prepare_visual(
         segment_ids = sorted({segment for unit_id in selected_units for segment in unit_segments.get(unit_id, [])})
         regions: list[dict[str, Any]] = []
         for order, block in enumerate(ordered):
-            furniture_role = _furniture_role(block, furniture[page_number - 1])
+            furniture_role = _furniture_role(block, furniture.get(page_number, {}))
             if furniture_role:
                 # Removed from the working draft by pdf_text.clean_pdf.
                 role, risk, reasons, disposition = furniture_role, 0, ["page_furniture_removed"], "omit_approved"
