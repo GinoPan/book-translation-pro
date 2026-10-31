@@ -34,6 +34,10 @@ where = ["scripts"]
 "share/book-translation-pro/assets/project-template/config" = ["assets/project-template/config/style-guide.md"]
 "share/book-translation-pro/assets/style-guides" = ["assets/style-guides/*.md"]
 
+[tool.pytest.ini_options]
+# Test the checkout being edited, not whichever copy is pip-installed.
+pythonpath = ["scripts"]
+
 [tool.unittest]
 start-directory = "tests"
 

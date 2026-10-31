@@ -10,6 +10,7 @@ from pathlib import Path
 from book_translation_pro.artifacts import atomic_write_json, sha256_file
 from book_translation_pro.build import build_outputs, typeset_preview
 from book_translation_pro.config import load_resolved_project
+from book_translation_pro.exceptions import save_exceptions
 from book_translation_pro.project import initialize_project, prepare_project
 from book_translation_pro.publication_review import record_publication_review
 from book_translation_pro.qa import run_qa
@@ -53,6 +54,14 @@ class PublicationReleaseTests(unittest.TestCase):
             )
             prepare_project(project)
             complete_fake_semantic_work(project)
+            # Publication warnings need approved exceptions; the identity
+            # fixture is intentionally untranslated.
+            save_exceptions(project, {"schema_version": 1, "exceptions": [{
+                "id": "EX-identity-fixture", "check_id": "content.untranslated", "scope": "book",
+                "rationale": "Identity fixture exercises publication mechanics only.",
+                "status": "approved", "approved_by": "integration-test",
+                "approved_at": "2026-09-05T00:00:00Z", "evidence": ["tests/integration/test_v1_publication.py"],
+            }]})
             config, _ = load_resolved_project(project)
             candidate = typeset_preview(project, config)
             checks = candidate["publication_validation"]["checks"]
@@ -75,6 +84,8 @@ class PublicationReleaseTests(unittest.TestCase):
                 (project / "qa" / "publication-review-template.json").read_text(encoding="utf-8")
             )
             review["reviewer"] = "integration-test"
+            for check in review["checks"]:
+                check["status"] = "approved"
             review_path = project / "qa" / "publication-review-input.json"
             atomic_write_json(review_path, review)
             record_publication_review(project, review_path)

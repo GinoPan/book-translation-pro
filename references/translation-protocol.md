@@ -22,7 +22,7 @@ The capsule is context, not authority. Do not add facts absent from the source, 
 
 ## Translation
 
-Use `show-unit --phase translate`. Read the source unit, Style Guide, approved Glossary entries, incoming Capsule, and user instructions.
+Use `show-unit --phase translate`. Read the source unit, Style Guide, approved Glossary entries, incoming Capsule, `chapter_context` (summaries of earlier units in the same chapter), and user instructions. Translate from this package and record the draft before its inputs change; a draft recorded after its inputs changed is rejected.
 
 - Translate every source element in order.
 - Preserve heading levels, lists, tables, code blocks, raw markup, links, image paths, note anchors, citations, formulas, numbers, units, model identifiers, and URLs.
@@ -44,6 +44,11 @@ Write an observation JSON beside it:
 ```
 
 Every proposed term or conflict must include source evidence and a source segment or unit reference. Empty arrays are valid.
+
+QA blocks omitted paragraphs, truncated units, and text left in the source language. When a difference is intentional, say so in `source_issues` with one of these prefixes, followed by a reason:
+
+- `structure_reflowed: <reason>`: prose blocks were legitimately merged or removed (for example, OCR label fragments)
+- `untranslated_by_design: <reason>`: material intentionally kept in the source language (for example, a bibliography)
 
 ## Edit Pass
 

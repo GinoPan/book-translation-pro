@@ -46,7 +46,7 @@ rights:
 - EPUB metadata includes a compact rights declaration.
 - A generated notice reports the user's declaration and explicitly states that it is not legal advice or rights certification.
 
-These checks are intentionally not bypassed by a generic QA exception. If the declaration changes, edit `book-project.yaml`, rerun `prepare --rebuild` as required by the configuration hash, create a new typeset candidate, and repeat the current publication review and signoff.
+These checks are intentionally not bypassed by a generic QA exception. If the declaration changes, edit `book-project.yaml`, rerun `prepare` (the rights declaration does not affect extraction, so translations are kept), create a new typeset candidate, and repeat the current publication review and signoff.
 
 ## Data handling
 

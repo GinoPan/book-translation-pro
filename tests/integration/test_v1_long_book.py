@@ -13,7 +13,7 @@ from book_translation_pro.config import load_resolved_project
 from book_translation_pro.manifest import load_manifest
 from book_translation_pro.project import initialize_project, prepare_project
 from book_translation_pro.qa import run_qa
-from book_translation_pro.state import plan_run, record_text_output
+from book_translation_pro.state import dispatch_unit, plan_run, record_text_output
 
 
 LONG_SOURCE = os.environ.get("BTP_LONG_BOOK_FIXTURE")
@@ -51,11 +51,13 @@ class LongBookBaselineTests(unittest.TestCase):
                 atomic_write_json(capsule_path, capsule)
                 atomic_write_json(safe_project_path(project, entry["observation_file"]), {
                     "schema_version": 1, "new_entries": [], "conflicts": [],
-                    "source_issues": [], "used_glossary_ids": [],
+                    # Identity "translation" exercises pipeline mechanics only.
+                    "source_issues": ["untranslated_by_design: identity fixture"], "used_glossary_ids": [],
                 })
                 source_path = safe_project_path(project, entry["source_file"])
                 target_path = safe_project_path(project, entry["draft_file"])
                 atomic_write_text(target_path, source_path.read_text(encoding="utf-8"))
+                dispatch_unit(project, entry["unit_id"])
                 record_text_output(project, entry["unit_id"], "draft")
                 if index + 1 == midpoint:
                     partial = plan_run(project, False, config["execution"]["max_attempts_per_unit"])

@@ -10,6 +10,7 @@
     "resolved_config_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "book_map_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "page_map_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "extraction_config_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "style_guide_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "units": {
       "type": "array",

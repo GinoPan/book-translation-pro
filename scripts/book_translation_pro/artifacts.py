@@ -8,8 +8,10 @@ import os
 import shutil
 import tempfile
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import jsonschema
 
@@ -162,6 +164,77 @@ def validate_schema(value: Any, name: str) -> None:
     except jsonschema.ValidationError as exc:
         where = ".".join(str(part) for part in exc.absolute_path) or "<root>"
         raise BTPError(f"Schema validation failed for {name} at {where}: {exc.message}") from exc
+
+
+_HELD_LOCKS: dict[str, int] = {}
+
+
+@contextmanager
+def project_lock(project: Path, timeout: float | None = None) -> Iterator[None]:
+    """Serialize read-modify-write cycles on shared project state across processes.
+
+    The OS releases the lock when a process dies, so an interrupted worker can
+    never leave a stale lock behind. Nested use within one process is allowed.
+    """
+    lock_path = normalize_path(project) / ".btp.lock"
+    key = os.path.normcase(str(lock_path))
+    if _HELD_LOCKS.get(key):
+        _HELD_LOCKS[key] += 1
+        try:
+            yield
+        finally:
+            _HELD_LOCKS[key] -= 1
+        return
+    if timeout is None:
+        timeout = float(os.environ.get("BTP_LOCK_TIMEOUT", "600"))
+    if not lock_path.parent.is_dir():
+        raise BTPError(f"Project directory does not exist: {lock_path.parent}")
+    handle = open(lock_path, "a+b")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                _try_lock(handle)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise BTPError(
+                        f"Timed out after {timeout:.0f}s waiting for the project lock {lock_path}; "
+                        "another btp command is still writing project state"
+                    )
+                time.sleep(0.05)
+        _HELD_LOCKS[key] = 1
+        try:
+            yield
+        finally:
+            _HELD_LOCKS.pop(key, None)
+            _unlock(handle)
+    finally:
+        handle.close()
+
+
+def _try_lock(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def project_file(project: Path, relative: str, *, required: bool = True) -> Path:

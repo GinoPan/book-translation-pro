@@ -74,7 +74,7 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
 7. Run `BTP plan <project-dir>`. Resolve every `blocked` item. Use `translation_unit_ids`, `record_only_unit_ids`, and `edit_unit_ids` exactly; do not rediscover the queue from directory listings.
 
-8. For each translation unit, inspect `show-unit --phase translate`, dispatch one isolated worker, then record its draft and observation. The work package includes mapped source-page images and crops. When available, attach `--duration-seconds`, `--input-tokens`, `--output-tokens`, `--cost`, and `--currency`; these are audit metrics, never semantic dependencies. After each batch, review observations and transactionally update the Glossary through `record --kind glossary`; rerun `plan` because the update may invalidate earlier units.
+8. For each translation unit, inspect `show-unit --phase translate`, dispatch one isolated worker, then record its draft and observation. `show-unit --phase translate` snapshots the unit's inputs under `state/dispatch/`; `record --kind draft` refuses a draft when no package was issued or when the source, Glossary selection, Style Guide, incoming capsule, or configuration changed after issue. Parallel workers may record concurrently: every state-changing command takes the project lock (`.btp.lock`, wait limit `BTP_LOCK_TIMEOUT`, default 600 s). The work package includes mapped source-page images and crops. When available, attach `--duration-seconds`, `--input-tokens`, `--output-tokens`, `--cost`, and `--currency`; these are audit metrics, never semantic dependencies. After each batch, review observations and transactionally update the Glossary through `record --kind glossary`; rerun `plan` because the update may invalidate earlier units.
 
 9. For each edit unit, inspect `show-unit --phase edit`, author a separate edited file, and record it with `record --kind edit`.
 
@@ -93,7 +93,7 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
 For layout iteration before QA is green, run `BTP typeset <project-dir>`. This creates a clearly marked review candidate under `dist/typeset-preview/` and never changes the build stage or bypasses the final build gate. Any later candidate, clean-master, review, exception, or generated-file change invalidates the recorded signoff.
 
-`prepare --rebuild` is required after a prepared source/configuration change. It clears only derived directories inside the translation project and preserves the copied source, user configuration, Style Guide, and Glossary.
+After editing `book-project.yaml`, run `prepare`. A change that does not affect extraction (outputs, layout, review policy, target, instructions) is adopted in place; units stay and `plan` re-queues only those whose translation inputs changed. A change to source, chunking, or visual settings requires `prepare --rebuild`. Rebuild regenerates extraction, Book Map, units, and page evidence but preserves translations, edits, capsules of units whose source text is unchanged, worker observations, page reviews, approved exceptions, and unit records; `plan` then re-queues exactly the units whose source changed. Files of units that no longer exist are moved to `target/orphaned/<timestamp>/` and listed in the output. CLI overrides such as `prepare --mode fast` are written to `book-project.yaml`.
 
 ## Evidence priority
 
