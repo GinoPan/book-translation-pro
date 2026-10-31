@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -30,6 +31,9 @@ DEFAULT_RIGHTS: dict[str, Any] = {
     "notes": "",
     "include_notice_in_outputs": True,
 }
+# Headings of the generated rights page; publication treats them as front matter.
+NOTICE_TITLE_ZH = "版权与授权"
+NOTICE_TITLE_EN = "Copyright and Authorization"
 
 _STATUS_LABELS_ZH = {
     "unknown": "尚未确认",
@@ -144,7 +148,7 @@ def rights_notice_markdown(config: dict[str, Any]) -> str:
 
     if chinese:
         lines = [
-            "# 版权与授权",
+            f"# {NOTICE_TITLE_ZH}",
             "",
             f"**权利状态：** {_STATUS_LABELS_ZH[status]}",
             f"**声明用途：** {_USE_LABELS_ZH[intended_use]}",
@@ -171,7 +175,7 @@ def rights_notice_markdown(config: dict[str, Any]) -> str:
         lines.append("本声明记录项目使用者提供的信息，不构成法律意见或权利认证。")
     else:
         lines = [
-            "# Copyright and Authorization",
+            f"# {NOTICE_TITLE_EN}",
             "",
             f"**Rights status:** {_STATUS_LABELS_EN[status]}",
             f"**Declared use:** {_USE_LABELS_EN[intended_use]}",
@@ -236,6 +240,21 @@ def _notice_paragraph_en(status: str, redistribution_allowed: bool) -> str:
     )
 
 
+def _title_block_heading(lines: list[str], index: int) -> bool:
+    """A short sub-heading on the title page (author, subtitle).
+
+    It is followed directly by a heading of the same or a higher level (the
+    first chapter); a heading followed by its own sub-heading opens a section.
+    """
+    stripped = lines[index].strip()
+    match = re.match(r"^(#{2,6})\s+\S", stripped)
+    if not match or len(stripped) > 80:
+        return False
+    following = next((line.strip() for line in lines[index + 1:] if line.strip()), "")
+    level = re.match(r"^(#{1,6})\s", following)
+    return bool(level) and len(level.group(1)) <= len(match.group(1))
+
+
 def insert_rights_notice(markdown: str, config: dict[str, Any]) -> str:
     """Insert one generated rights page after the translated title block."""
     rights = rights_config(config)
@@ -252,7 +271,7 @@ def insert_rights_notice(markdown: str, config: dict[str, Any]) -> str:
     insert_at = title_index + 1
     while insert_at < len(lines):
         stripped = lines[insert_at].strip()
-        if not stripped or (stripped.startswith("*") and stripped.endswith("*")):
+        if not stripped or (stripped.startswith("*") and stripped.endswith("*")) or _title_block_heading(lines, insert_at):
             insert_at += 1
             continue
         break

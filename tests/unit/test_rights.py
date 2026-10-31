@@ -117,6 +117,21 @@ class RightsTests(unittest.TestCase):
         self.assertLess(rendered.index("# 版权与授权"), rendered.index("# 第一章"))
         self.assertEqual(insert_rights_notice(rendered, config), rendered)
 
+    def test_notice_follows_the_whole_title_page(self) -> None:
+        config = resolve_config(base_config())
+        original = "# 示例书\n\n### 某某 著\n\n## 第一章 机器\n\n正文。\n"
+        rendered = insert_rights_notice(original, config)
+        self.assertLess(rendered.index("### 某某 著"), rendered.index("# 版权与授权"))
+        self.assertLess(rendered.index("# 版权与授权"), rendered.index("## 第一章 机器"))
+        # A chapter heading followed by its own sub-heading is not part of the title page.
+        original = "# 示例书\n\n## 第一章 机器\n\n### 1.1 背景\n\n正文。\n"
+        rendered = insert_rights_notice(original, config)
+        self.assertLess(rendered.index("# 版权与授权"), rendered.index("## 第一章 机器"))
+        # A front-matter heading with its own text is not part of the title page.
+        original = "# 示例书\n\n## 前言\n\n前言正文。\n"
+        rendered = insert_rights_notice(original, config)
+        self.assertLess(rendered.index("# 版权与授权"), rendered.index("## 前言"))
+
 
 if __name__ == "__main__":
     unittest.main()

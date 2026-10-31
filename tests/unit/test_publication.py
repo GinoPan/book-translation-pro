@@ -189,7 +189,7 @@ class PublicationCleanupTests(unittest.TestCase):
 
 <!-- 内部视觉切片说明 -->
 
-| 编号 | A | B | C | D | E | F |
+| 编号 | 第一项指标说明 | 第二项指标说明 | 第三项指标说明 | 第四项指标说明 | 第五项指标说明 | 第六项指标说明 |
 |---:|---|---|---|---|---|---|
 | 1 | a | b | c | d | e | f |
 """
@@ -213,7 +213,7 @@ class PublicationCleanupTests(unittest.TestCase):
 
     def test_converts_html_wide_table_before_splitting(self) -> None:
         source = """
-<table><thead><tr><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th><th>G</th></tr></thead>
+<table><thead><tr><th>A</th><th>Bearing preload</th><th>Clearance class</th><th>Lubricant grade</th><th>Seal material</th><th>Housing fit</th><th>Inspection interval</th></tr></thead>
 <tbody><tr><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td></tr></tbody></table>
 """
         cleaned = clean_markdown_for_publication(source)
@@ -222,13 +222,52 @@ class PublicationCleanupTests(unittest.TestCase):
 
     def test_splits_pandoc_short_alignment_separators(self) -> None:
         source = """
-| A | B | C | D | E | F | G |
+| A | Bearing preload | Clearance class | Lubricant grade | Seal material | Housing fit | Inspection interval |
 |:--|:--:|:--:|:--:|:--:|:--:|:--:|
 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 """
         cleaned = clean_markdown_for_publication(source)
         self.assertIn("*（续表）*", cleaned)
-        self.assertNotIn("| A | B | C | D | E | F | G |", cleaned)
+        self.assertNotIn("| Seal material | Housing fit | Inspection interval |", cleaned)
+
+    def test_epub_figures_bind_their_caption_and_alt_text(self) -> None:
+        from book_translation_pro.publication import _bind_figure_captions
+
+        xhtml = (
+            '<p><img src="a.png" /></p>\n<p>Figure 1.1 The floor in 1910.</p>\n'
+            '<p>图 2.1 夜班 &amp; 早班。</p>\n<p><img src="b.png" /></p>\n'
+            '<p><img src="c.png" /></p>\n<p>Figure 3 shows how the line was organised across the stations over many decades.</p>\n'
+        )
+        bound = _bind_figure_captions(xhtml)
+        self.assertIn('<figure><img src="a.png" alt="Figure 1.1 The floor in 1910." />'
+                      '<figcaption>Figure 1.1 The floor in 1910.</figcaption></figure>', bound)
+        self.assertIn('<figure><figcaption>图 2.1 夜班 &amp; 早班。</figcaption>'
+                      '<img src="b.png" alt="图 2.1 夜班 &amp; 早班。" /></figure>', bound)
+        # Long prose citing a figure is not a caption.
+        self.assertIn('<p><img src="c.png" /></p>', bound)
+
+    def test_narrow_six_column_table_stays_whole(self) -> None:
+        source = """
+| Year | Press | Paint | Store | Gate | Total |
+|---|---|---|---|---|---|
+| 1910 | 12 | 10 | 8 | 6 | 36 |
+"""
+        cleaned = clean_markdown_for_publication(source)
+        self.assertNotIn("续表", cleaned)
+        self.assertEqual(cleaned.count("| Year |"), 1)
+
+    def test_continuation_label_follows_the_target_language(self) -> None:
+        from book_translation_pro.publication import _continuation_label
+
+        source = """
+| A | Bearing preload | Clearance class | Lubricant grade | Seal material | Housing fit | Inspection interval |
+|---|---|---|---|---|---|---|
+| 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+"""
+        english = clean_markdown_for_publication(source, continuation=_continuation_label({"target": {"language": "en"}}))
+        self.assertIn("*(continued)*", english)
+        self.assertNotIn("续表", english)
+        self.assertEqual(_continuation_label({"target": {"language": "zh-Hans"}}), "（续表）")
 
     def test_reproportions_pandoc_short_separators(self) -> None:
         source = "| 中文表头 | Amount |\n|:--|:--:|\n| 一 | $2,043 |"
@@ -376,6 +415,28 @@ class DocxLayoutTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 _path, document = _laid_out_docx(directory, ["前言", *chapters])
                 self.assertEqual(len(document.sections), 3, chapters)
+
+    def test_generated_rights_page_stays_in_front_matter(self) -> None:
+        for notice in ("Copyright and Authorization", "版权与授权"):
+            with tempfile.TemporaryDirectory() as directory:
+                _path, document = _laid_out_docx(directory, [notice, "The Machine Age", "The Mill Town"])
+                self.assertEqual(len(document.sections), 3, notice)
+                self.assertEqual(document.sections[1].header.paragraphs[0].text, "The Machine Age")
+
+    def test_chapters_under_a_lone_title_are_lifted_to_level_one(self) -> None:
+        from book_translation_pro.publication import _lift_chapter_level
+
+        lines = ["# The Machine Age", "", "### A. N. Author", "", "# Copyright and Authorization", "",
+                 "## Chapter 1 The Factory", "", "```", "## not a heading", "```", "", "### 1.1 Floor",
+                 "", "## Chapter 2 The Workers"]
+        self.assertEqual(
+            [line for line in _lift_chapter_level(lines) if line.startswith("#")],
+            ["# The Machine Age", "## A. N. Author", "# Copyright and Authorization", "# Chapter 1 The Factory",
+             "## not a heading", "## 1.1 Floor", "# Chapter 2 The Workers"],
+        )
+        # Two body headings at level 1 already: nothing to lift.
+        already = ["# Chapter 1", "", "## 1.1", "", "# Chapter 2", "", "## 2.1"]
+        self.assertEqual(_lift_chapter_level(already), already)
 
     def test_bilingual_title_pair_shares_one_opener(self) -> None:
         from docx import Document

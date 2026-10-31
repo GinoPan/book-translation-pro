@@ -280,6 +280,28 @@ class PreparedLayout(unittest.TestCase):
 class DestructiveRulesNeedTwoSignals(unittest.TestCase):
     """Text that only looks like page furniture must survive cleaning."""
 
+    def test_short_chapter_running_head_repeating_the_bare_title_is_removed(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = fitz.open()
+            opener = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+            opener.insert_text((40, 90), "Chapter 1 The Factory", fontsize=18)
+            opener.insert_textbox(fitz.Rect(40, 120, 380, 400), SENTENCE * 6, fontsize=10)
+            # One odd page carries the bare chapter title: below the repeat threshold.
+            page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+            page.insert_text((160, 30), "THE FACTORY", fontsize=8)
+            page.insert_textbox(fitz.Rect(40, 60, 380, 400), SENTENCE * 6, fontsize=10)
+            # The same words in small type inside the text block are not furniture.
+            page.insert_text((40, 420), "The Factory", fontsize=8)
+            document.save(root / "short.pdf")
+            document.close()
+            record = clean_pdf(root / "short.pdf", root / "clean.pdf")
+            self.assertEqual([(item["page"], item["text"]) for item in record["removed"]], [(2, "THE FACTORY")])
+            with fitz.open(root / "clean.pdf") as cleaned:
+                self.assertIn("The Factory", cleaned[1].get_text())
+
     def test_poems_epigraphs_and_roman_letter_words_are_kept(self) -> None:
         import fitz
 
