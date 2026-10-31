@@ -143,6 +143,27 @@ class FigureAuditTests(unittest.TestCase):
             self.assertEqual(dispositions, {("figure", "1"): "target_asset", ("table", "1"): "missing_target_caption"})
             self.assertFalse(report["passed"])
 
+    def test_regular_weight_caption_is_recognized(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._project(root, "")
+            image_dir = root / "assets" / "original" / "images"
+            image_dir.mkdir(parents=True)
+            Image.new("RGB", (64, 64), "white").save(image_dir / "exhibit-1-1.png")
+            (root / "target" / "edited" / "unit-0001.md").write_text(
+                '<img src="assets\\original/images/exhibit-1-1.png" />\n\n'
+                '<span class="calibre14">图表 1.1 1910 年的工厂车间。</span>\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(run_figure_audit(root, config)["figures"][0]["disposition"], "target_asset")
+
+    def test_long_paragraph_opening_with_a_label_is_prose(self) -> None:
+        prose = "图表 1.1 显示了工厂在十年间的产量变化，" + "其中每个工位的记录都由工头在周五晚上核对并汇总到总账中，" * 3
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._project(root, prose + "\n")
+            self.assertEqual(run_figure_audit(root, config)["figures"][0]["disposition"], "missing_target_caption")
+
     def test_missing_image_file_does_not_count_as_a_target_asset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

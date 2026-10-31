@@ -43,6 +43,9 @@ class FakePage:
     def get_image_rects(self, xref: int) -> list[fitz.Rect]:
         return [self._images[xref]]
 
+    def get_text(self, option: str) -> dict:
+        return {"blocks": []}  # geometry-only stub: no chart labels
+
 
 class FigureCropTests(unittest.TestCase):
     page_rect = fitz.Rect(0, 0, 433.2, 649.2)
@@ -68,6 +71,55 @@ class FigureCropTests(unittest.TestCase):
         self.assertIsNotNone(result)
         crop, _ = result
         self.assertGreater(crop.y0, 250)
+
+    def test_bar_chart_is_cropped_whole_with_its_tick_labels(self) -> None:
+        document = fitz.open()
+        page = document.new_page(width=432, height=648)
+        body = "The ledger shows that output rose steadily through the decade at every station."
+        page.insert_text((48, 100), body, fontsize=10)
+        page.insert_text((48, 112), "evening", fontsize=10)  # short last line of a paragraph
+        page.insert_text((72, 128), "Exhibit 1.2 Output by decade", fontsize=9)
+        base = 330
+        page.draw_line((90, 140), (90, base), color=(0, 0, 0))
+        page.draw_line((90, base), (360, base), color=(0, 0, 0))
+        for index, value in enumerate((60, 110, 150, 90)):
+            x = 110 + index * 62  # bars 26 pt apart: wider than the cluster gap
+            page.draw_rect(fitz.Rect(x, base - value, x + 36, base), color=(0, 0, 0), fill=(0.4, 0.5, 0.7))
+            page.insert_text((x + 6, base + 12), str(1910 + index * 10), fontsize=8)
+            page.insert_text((x + 8, base - value - 4), str(value), fontsize=7)
+        page.insert_text((72, base + 24), "Source: Company records.", fontsize=7)
+        caption = page.search_for("Exhibit 1.2")[0]
+        crop, orientation = _figure_crop_box(page, list(caption))
+        self.assertEqual(orientation, "below_caption")
+        self.assertLessEqual(crop.x0, 90)
+        self.assertGreaterEqual(crop.x1, 360)
+        for label in ("1910", "1940", "150", "60"):
+            self.assertTrue(crop.contains(page.search_for(label)[0]), label)
+        for kept in ("evening", "Source: Company records."):
+            self.assertFalse(crop.intersects(page.search_for(kept)[0]), kept)
+        document.close()
+
+    def test_label_absorption_skips_neighbouring_captions_and_claimed_tables(self) -> None:
+        document = fitz.open()
+        page = document.new_page(width=432, height=648)
+        page.insert_textbox(fitz.Rect(48, 400, 384, 600), "Body text of the chapter continues here. " * 12, fontsize=10)
+        page.insert_text((72, 128), "Figure 1 Output", fontsize=9)
+        page.draw_line((90, 140), (90, 300), color=(0, 0, 0))
+        page.draw_line((90, 300), (360, 300), color=(0, 0, 0))
+        page.draw_rect(fitz.Rect(110, 200, 146, 300), color=(0, 0, 0), fill=(0.4, 0.5, 0.7))
+        page.insert_text((300, 316), "Figure 2", fontsize=8)  # the next exhibit's short caption
+        table = fitz.Rect(150, 306, 260, 330)  # a claimed table right under the axis
+        page.insert_text((160, 318), "12", fontsize=8)
+        caption = page.search_for("Figure 1 Output")[0]
+        crop, _orientation = _figure_crop_box(page, list(caption), avoid=[table])
+        self.assertFalse(crop.intersects(page.search_for("Figure 2")[0]))
+        self.assertFalse(crop.intersects(table))
+        document.close()
+
+    def test_clusters_merge_through_a_later_bridge(self) -> None:
+        # The bridge arrives last in x order but connects both ends.
+        rects = [fitz.Rect(0, 0, 10, 100), fitz.Rect(200, 0, 210, 100), fitz.Rect(5, 90, 205, 92)]
+        self.assertEqual(len(_cluster_rects(rects, gap=5.0)), 1)
 
     def test_clusters_split_disjoint_geometry(self) -> None:
         rects = [fitz.Rect(0, 0, 100, 100), fitz.Rect(0, 0, 80, 80), fitz.Rect(300, 300, 400, 400)]

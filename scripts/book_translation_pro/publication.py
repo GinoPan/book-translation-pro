@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import os
 import posixpath
 import re
@@ -33,7 +34,7 @@ from .artifacts import (
 )
 from .manifest import load_manifest
 from .runtime import epubcheck_command, find_binary
-from .rights import insert_rights_notice, rights_metadata_text
+from .rights import NOTICE_TITLE_EN, NOTICE_TITLE_ZH, insert_rights_notice, rights_metadata_text
 
 
 PRINT_MARKER_RE = re.compile(
@@ -105,6 +106,7 @@ FRONT_TITLES = {
     "撰稿人简介", "作者简介", "译者序", "致谢", "版权页", "书名页",
     "foreword", "preface", "introduction", "summary", "abstract", "contributors",
     "acknowledgments", "acknowledgements", "copyright", "title page",
+    NOTICE_TITLE_ZH, NOTICE_TITLE_EN.casefold(),
 }
 TOC_TITLES = {"目录", "contents", "table of contents"}
 # Shown by the TOC field until Word refreshes it; LibreOffice never does.
@@ -1433,7 +1435,18 @@ def _pipe_row(cells: list[str]) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
-def _split_wide_tables(lines: list[str], max_columns: int = 5) -> list[str]:
+# Display width (Latin character = 1, CJK = 2) that a table may use before it
+# is split; the default trim's text column holds about this much at 9 pt.
+TABLE_FIT_WIDTH = 72
+CONTINUED_TABLE_LABELS = {"zh": "（续表）"}
+
+
+def _continuation_label(config: dict[str, Any]) -> str:
+    language = str(config.get("target", {}).get("language", "")).lower()
+    return next((label for prefix, label in CONTINUED_TABLE_LABELS.items() if language.startswith(prefix)), "(continued)")
+
+
+def _split_wide_tables(lines: list[str], max_columns: int = 5, continuation: str = "（续表）") -> list[str]:
     """Split wide pipe tables into readable column groups with key column repeated."""
     result: list[str] = []
     index = 0
@@ -1461,7 +1474,10 @@ def _split_wide_tables(lines: list[str], max_columns: int = 5) -> list[str]:
             continue
         normalized = [row + [""] * (width - len(row)) for row in block]
         header = " ".join(normalized[0]) if normalized else ""
-        compact = (
+        # A table whose columns fit the text width stays whole however many
+        # columns it has; splitting a small numeric grid only hurts reading.
+        natural = sum(max(max((_display_width(row[column]) for row in normalized), default=0), 4) + 3 for column in range(width))
+        compact = natural <= TABLE_FIT_WIDTH or (
             max((len(cell) for row in normalized for cell in row), default=0) <= 18
             and "总数" in header
             and ("N/A" in header or "N／A" in header)
@@ -1487,7 +1503,7 @@ def _split_wide_tables(lines: list[str], max_columns: int = 5) -> list[str]:
         for group_index, group in enumerate(groups):
             columns = list(range(repeat_columns)) + group
             if group_index:
-                result.extend(["", "*（续表）*", ""])
+                result.extend(["", f"*{continuation}*", ""])
             result.extend(_pipe_row([row[column] for column in columns]) for row in normalized)
     return result
 
@@ -1602,12 +1618,39 @@ def _reproportion_pipe_separators(lines: list[str]) -> list[str]:
     return result
 
 
-def clean_markdown_for_publication(markdown: str) -> str:
+def _lift_chapter_level(lines: list[str]) -> list[str]:
+    """Promote chapters to level 1 when level 1 holds only the book title.
+
+    PDF extraction ranks headings by font size, so a title page set larger
+    than the chapter openers leaves every chapter at level 2, while DOCX
+    sections and EPUB chapter files are cut at level 1.
+    """
+    front = {title.casefold() for title in (*FRONT_TITLES, *TOC_TITLES)}
+    headings: list[tuple[int, int, str]] = []
+    fenced = False
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        match = None if fenced else HEADING_RE.match(line.strip())
+        if match:
+            headings.append((index, len(match.group(1)), _plain(match.group(2)).casefold()))
+    top = [item for item in headings if item[1] == 1 and item[2] not in front]
+    if len(top) != 1 or headings[0] != top[0] or sum(1 for item in headings if item[1] == 2) < 2:
+        return lines
+    lifted = list(lines)
+    for index, level, _text in headings:
+        if index > top[0][0] and level >= 2:
+            lifted[index] = "#" * (level - 1) + lines[index].strip()[level:]
+    return lifted
+
+
+def clean_markdown_for_publication(markdown: str, continuation: str = "（续表）") -> str:
     """Remove print-production residue and normalize common book structure."""
     markdown = _normalize_html_headings(markdown)
     lines = _strip_print_artifacts(markdown)
     lines = _replace_static_toc(lines)
     lines = _normalize_structure(lines)
+    lines = _lift_chapter_level(lines)
     lines = _strip_trailing_recovery_material(lines)
     lines = _join_dangling_paragraphs(lines)
     # Convert raw HTML tables before splitting wide tables.  CHM/EPUB
@@ -1615,7 +1658,7 @@ def clean_markdown_for_publication(markdown: str) -> str:
     # line list first would miss those tables and leave seven-plus-column
     # grids to collapse in DOCX/PDF.
     text = _convert_html_tables("\n".join(lines))
-    text = "\n".join(_separate_html_blocks_from_tables(_reproportion_pipe_separators(_split_wide_tables(text.splitlines()))))
+    text = "\n".join(_separate_html_blocks_from_tables(_reproportion_pipe_separators(_split_wide_tables(text.splitlines(), continuation=continuation))))
     # Extraction and translation can leave <br> inside table cells; the
     # HTML5 short form is invalid XML and breaks the semantic XHTML/EPUB
     # build, so normalize it to the self-closing form.
@@ -2049,6 +2092,43 @@ def _table_column_widths(document: Any, table: Any, target_total: int) -> list[i
 
 
 FIGURE_CAPTION_RE = re.compile(rf"^\s*{TARGET_CAPTION_LABELS}\s*\d", re.IGNORECASE)
+
+
+_IMAGE_PARAGRAPH = r'<p>\s*<img (?P<attrs>[^>]*?)\s*/>\s*</p>'
+_CAPTION_PARAGRAPH = r"<p>(?P<caption>(?:(?!</p>).){1,400})</p>"
+_FIGURE_AFTER_RE = re.compile(_IMAGE_PARAGRAPH + r"\s*" + _CAPTION_PARAGRAPH, re.DOTALL)
+_FIGURE_BEFORE_RE = re.compile(_CAPTION_PARAGRAPH + r"\s*" + _IMAGE_PARAGRAPH, re.DOTALL)
+
+
+def _bind_figure_captions(xhtml: str) -> str:
+    """Pair a lone image with the short caption paragraph beside it as <figure>/<figcaption>.
+
+    Reflowable readers keep a figure together, and the caption becomes the
+    image's alt text.  Only the XHTML/EPUB edition is changed: Pandoc would
+    turn Markdown alt text into a second, duplicate caption in DOCX.
+    """
+
+    def caption_text(match: re.Match[str]) -> str | None:
+        plain = html.unescape(re.sub(r"<[^>]+>", "", match.group("caption"))).strip()
+        if "alt=" in match.group("attrs") or len(plain) > 80 or not FIGURE_CAPTION_RE.match(plain):
+            return None
+        return plain
+
+    def after(match: re.Match[str]) -> str:
+        plain = caption_text(match)
+        if plain is None:
+            return match.group(0)
+        return (f'<figure><img {match.group("attrs")} alt="{html.escape(plain, quote=True)}" />'
+                f'<figcaption>{match.group("caption")}</figcaption></figure>')
+
+    def before(match: re.Match[str]) -> str:
+        plain = caption_text(match)
+        if plain is None:
+            return match.group(0)
+        return (f'<figure><figcaption>{match.group("caption")}</figcaption>'
+                f'<img {match.group("attrs")} alt="{html.escape(plain, quote=True)}" /></figure>')
+
+    return _FIGURE_BEFORE_RE.sub(before, _FIGURE_AFTER_RE.sub(after, xhtml))
 
 
 def _keep_figures_with_captions(document: Any) -> None:
@@ -2574,7 +2654,7 @@ def prepare_publication_markdown(
 ) -> tuple[str, dict[str, Any]]:
     """Build the deterministic Markdown master, including its rights page."""
     raw = merge_edited_units(project, config)
-    clean = clean_markdown_for_publication(raw)
+    clean = clean_markdown_for_publication(raw, continuation=_continuation_label(config))
     options = _publication_options(config)
     if options["folio_position"] == "auto":
         options["folio_position"] = detect_folio_position(project, config)
@@ -2690,6 +2770,7 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
         *metadata_args,
         f"--resource-path={external_tool_path(project)}", "--output", str(xhtml_path),
     ], project)
+    atomic_write_text(xhtml_path, _bind_figure_captions(xhtml_path.read_text(encoding="utf-8")))
     xhtml_validation = validate_xhtml_document(xhtml_path)
     if not xhtml_validation["passed"]:
         raise BTPError("Semantic XHTML validation failed: " + "; ".join(xhtml_validation["errors"]))

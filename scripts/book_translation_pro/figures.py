@@ -42,6 +42,9 @@ MARKED_TARGET_CAPTION_RE = re.compile(
     r"\*\*\s*" + TARGET_CAPTION_LABELS + r"\s*" + _CAPTION_KEY + r"(?=[\s*／/（(:：.])",
     re.IGNORECASE,
 )
+# A regular-weight paragraph this short that opens with a label and number is
+# a caption; a longer one is prose citing the exhibit.
+PLAIN_CAPTION_MAX_CHARS = 80
 # Target caption labels are recognized for these target languages only.
 CAPTION_LANGUAGES = ("zh", "en")
 PRINT_LAYOUT_LINE_RE = re.compile(
@@ -93,15 +96,22 @@ def _meaningful_image_refs(project: Path, markdown: str) -> Counter[str]:
 
 
 def _caption_matches(line: str) -> list[re.Match[str]]:
-    """Caption labels on a target caption line: bold text (possibly in a span) or a heading.
+    """Caption labels on a target caption line.
 
-    Ordinary prose references are not a reliable location for a figure asset.
+    A caption is bold text (possibly in a span), a heading, or a short
+    paragraph that opens with a label and number (a caption set in regular
+    weight).  A longer paragraph is prose that mentions an exhibit, which is
+    not a reliable location for its asset.
     """
     plain = re.sub(r"<[^>]+>", "", line)
     marked = list(MARKED_TARGET_CAPTION_RE.finditer(plain))
-    if marked or not line.lstrip().startswith("#"):
+    if marked:
         return marked
-    return list(TARGET_CAPTION_RE.finditer(plain))
+    if line.lstrip().startswith("#"):
+        return list(TARGET_CAPTION_RE.finditer(plain))
+    stripped = plain.strip().strip("*_ ")
+    opening = TARGET_CAPTION_RE.match(stripped)
+    return [opening] if opening and len(stripped) <= PLAIN_CAPTION_MAX_CHARS else []
 
 
 # How far from its caption an exhibit's image may sit, in Markdown lines;
@@ -336,10 +346,7 @@ def _apply_target_figure_repairs(
         caption_lines = caption_text.splitlines()
         caption_positions = [
             index for index, line in enumerate(caption_lines)
-            if key in {
-                _caption_key(match.group(1))
-                for match in MARKED_TARGET_CAPTION_RE.finditer(re.sub(r"<[^>]+>", "", line))
-            }
+            if key in {_caption_key(match.group(1)) for match in _caption_matches(line)}
         ]
         has_target_asset = any(
             f"![]({asset})" in "\n".join(caption_lines[max(0, position - 2):position + 3])
@@ -394,23 +401,10 @@ def _apply_target_figure_repairs(
             lines = caption_text.splitlines()
             inserted = False
             for index, line in enumerate(lines):
-                plain = re.sub(r"<[^>]+>", "", line)
                 # Match this exhibit's own caption number.  Several captions
-                # can share one unit, so inserting before the first marked
-                # caption of any key would plant the image above the wrong
-                # exhibit.
-                own_marked = any(
-                    _caption_key(match.group(1)) == key
-                    for match in MARKED_TARGET_CAPTION_RE.finditer(plain)
-                )
-                own_heading = (
-                    line.lstrip().startswith("#")
-                    and any(
-                        _caption_key(match.group(1)) == key
-                        for match in TARGET_CAPTION_RE.finditer(plain)
-                    )
-                )
-                if own_marked or own_heading:
+                # can share one unit, so inserting before the first caption
+                # of any key would plant the image above the wrong exhibit.
+                if any(_caption_key(match.group(1)) == key for match in _caption_matches(line)):
                     lines[index:index] = [f"![]({asset})", ""]
                     inserted = True
                     break
@@ -465,14 +459,19 @@ def _visual_geometry(page: Any) -> list[Any]:
     page_area = abs(page.rect.width * page.rect.height)
     for drawing in page.get_drawings():
         rectangle = drawing.get("rect")
-        if rectangle is None or rectangle.is_empty:
+        if rectangle is None:
             continue
         if rectangle.x0 < page.rect.x0 - 2 or rectangle.y0 < page.rect.y0 - 2:
             continue
         if rectangle.x1 > page.rect.x1 + 2 or rectangle.y1 > page.rect.y1 + 2:
             continue
         if rectangle.width < 2 or rectangle.height < 2:
-            continue
+            # A chart axis or frame is a line with no area, yet it is what
+            # ties the bars of one chart together.  Keep a long line as a
+            # thin strip; a short tick or hairline fragment stays out.
+            if max(rectangle.width, rectangle.height) < MIN_FIGURE_LINE:
+                continue
+            rectangle = rectangle + (-0.5, -0.5, 0.5, 0.5)
         if rectangle.width * rectangle.height > page_area * 0.9:
             continue
         rectangles.append(rectangle)
@@ -488,24 +487,71 @@ def _visual_geometry(page: Any) -> list[Any]:
     return rectangles
 
 
+# A drawn line at least this long (an axis, a frame side) counts as figure
+# geometry; shorter strokes are ticks or hairline fragments.
+MIN_FIGURE_LINE = 20.0
+# Chart labels folded into a figure crop: at most this many characters, and
+# no farther than LABEL_GAP points from the figure's drawn geometry.
+MAX_LABEL_CHARS = 18
+LABEL_GAP = 12.0
+
+
 def _cluster_rects(rectangles: list[Any], gap: float) -> list[list[Any]]:
-    """Group geometry rectangles into clusters whose boxes touch when padded."""
-    clusters: list[list[Any]] = []
-    boxes: list[Any] = []
-    for rectangle in sorted(rectangles, key=lambda rect: rect.get_area(), reverse=True):
+    """Group rectangles that touch when padded by ``gap``, transitively.
+
+    Connected components, not a single greedy pass: two bars that only meet
+    through a shared axis belong to one chart whatever order they arrive in.
+    """
+    ordered = sorted(rectangles, key=lambda rect: rect.x0)
+    parent = list(range(len(ordered)))
+
+    def root(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for index, rectangle in enumerate(ordered):
         padded = rectangle + (-gap, -gap, gap, gap)
-        target = None
-        for index, box in enumerate(boxes):
-            if box.intersects(padded):
-                target = index
-                break
-        if target is None:
-            clusters.append([rectangle])
-            boxes.append(rectangle)
-            continue
-        clusters[target].append(rectangle)
-        boxes[target] |= rectangle
-    return clusters
+        for other in range(index + 1, len(ordered)):
+            if ordered[other].x0 > padded.x1:
+                break  # sorted by x0: nothing further right can touch
+            if padded.intersects(ordered[other]):
+                parent[root(other)] = root(index)
+    clusters: dict[int, list[Any]] = {}
+    for index, rectangle in enumerate(ordered):
+        clusters.setdefault(root(index), []).append(rectangle)
+    return list(clusters.values())
+
+
+def _label_lines(page: Any) -> list[tuple[Any, str]]:
+    """Short chart labels: tick values, axis titles, legend keys.
+
+    Two signals are required before text is folded into a figure, since it
+    then leaves the translatable text: the line is short and not a sentence,
+    and it is set smaller than the page's body text or is mostly digits.
+    """
+    import fitz
+
+    lines: list[tuple[Any, str, float]] = []
+    sizes: Counter[float] = Counter()
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            spans = [span for span in line.get("spans", []) if str(span.get("text", "")).strip()]
+            if not spans:
+                continue
+            text = " ".join(" ".join(str(span["text"]) for span in spans).split())
+            size = max(float(span.get("size", 0)) for span in spans)
+            sizes[round(size, 1)] += len(text)
+            lines.append((fitz.Rect(line["bbox"]), text, size))
+    if not sizes:
+        return []
+    body = sizes.most_common(1)[0][0]
+    return [
+        (rect, text) for rect, text, size in lines
+        if len(text) <= MAX_LABEL_CHARS and not text.endswith((".", "。"))
+        and (size < body - 0.5 or sum(char.isdigit() for char in text) * 2 >= len(text.replace(" ", "")))
+    ]
 
 
 def _figure_crop_box(
@@ -527,7 +573,12 @@ def _figure_crop_box(
     import fitz
 
     caption = fitz.Rect(*caption_bbox)
-    geometry = _visual_geometry(page)
+    # Geometry inside an already claimed region (a ruled table) is not part
+    # of this exhibit; its rules would otherwise merge with a nearby chart.
+    geometry = [
+        rect for rect in _visual_geometry(page)
+        if not any(claimed.contains(rect) for claimed in avoid or [])
+    ]
     if not geometry:
         return None
 
@@ -567,11 +618,25 @@ def _figure_crop_box(
                 return True
         return False
 
-    for crop, orientation, _distance in candidates_by_orientation:
-        if not conflicts(crop):
-            return crop, orientation
-    crop, orientation, _distance = candidates_by_orientation[0]
-    return crop, orientation
+    chosen = next(
+        ((crop, orientation) for crop, orientation, _distance in candidates_by_orientation if not conflicts(crop)),
+        candidates_by_orientation[0][:2],
+    )
+    crop, orientation = chosen
+    # Tick values and axis titles sit just outside the drawn geometry; take
+    # them into the crop so the figure keeps them and the text loses them.
+    # Never a caption (this exhibit's or a neighbour's), and never text inside
+    # a claimed region: a table cell would drag the crop into the table.
+    labels = [
+        (rect, text) for rect, text in _label_lines(page)
+        if not rect.intersects(caption) and not SOURCE_CAPTION_RE.match(text)
+        and not any(claimed.intersects(rect) for claimed in avoid or [])
+    ]
+    for _pass in range(2):
+        for rect, _text in labels:
+            if (crop + (-LABEL_GAP, -LABEL_GAP, LABEL_GAP, LABEL_GAP)).intersects(rect):
+                crop |= rect + (-2, -2, 2, 2)
+    return crop & page.rect, orientation
 
 
 def _trim_scan_border(image: Any) -> Any:

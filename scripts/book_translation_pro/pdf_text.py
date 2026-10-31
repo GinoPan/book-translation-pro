@@ -69,6 +69,12 @@ FIGURE_CAPTION_RE = re.compile(
     re.IGNORECASE,
 )
 TABLE_CAPTION_RE = re.compile(r"^(?:table|表)\s*[0-9]+", re.IGNORECASE)
+# The label in front of a chapter or part title: "chapter 1", "part iv", "第三章", "1".
+_HEADING_LABEL_PREFIX_RE = re.compile(
+    r"^(?:(?:chapter|part|book|section)\s+[\w.]+|第\s*[0-9一二三四五六七八九十百零〇两]+\s*[章部节篇卷]|\d{1,3})"
+    r"[\s.:：、\-–—]*",
+    re.IGNORECASE,
+)
 # Tokens survive Calibre and PyMuPDF as plain text; Calibre may wrap one in a span.
 _TOKEN_RE = re.compile(r"(<span\b[^>]*>\s*)?BTP(TB|FN)(\d{4})Z(?(1)\s*</span>)")
 _EMPTY_BLOCK_RE = re.compile(r"^(?:\s|\xa0|</?div\b[^>]*>|<a id=\"[^\"]*\"></a>)*$")
@@ -292,13 +298,21 @@ def _document_profile(parsed: list[tuple[Any, list[dict[str, Any]]]]) -> dict[st
         "heading_map": _heading_map(parsed, body, levels),
         "running": _running_heads(parsed, body),
         "folios": _folio_offsets(parsed, body),
-        # Chapter-title running heads repeat a heading of the book.
+        # Chapter-title running heads repeat a heading of the book, usually
+        # without its label ("THE FACTORY" for "Chapter 1 The Factory").
         "headings": {
-            _normalize(_line_text(line))
+            form
             for _page, blocks in parsed for block in blocks for line in block["lines"]
             if _line_size(line) >= body * HEADING_SIZE_RATIO
+            for form in _heading_forms(_normalize(_line_text(line)))
         },
     }
+
+
+def _heading_forms(text: str) -> set[str]:
+    """A heading and, when it carries a chapter or part label, its bare title."""
+    bare = _HEADING_LABEL_PREFIX_RE.sub("", text, count=1).strip()
+    return {text, bare} if len(bare) >= 3 else {text}
 
 
 def _furniture_kind(line: dict[str, Any], block: dict[str, Any], page: Any, profile: dict[str, Any]) -> str | None:
