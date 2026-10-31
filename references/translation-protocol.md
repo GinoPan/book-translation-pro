@@ -45,7 +45,7 @@ Write an observation JSON beside it:
 
 Every proposed term or conflict must include source evidence and a source segment or unit reference. Empty arrays are valid.
 
-QA blocks omitted paragraphs, truncated units, and text left in the source language. When a difference is intentional, say so in `source_issues` with one of these prefixes, followed by a reason:
+QA blocks omitted paragraphs, truncated units, and text left in the source language. When a difference is intentional, say so in `source_issues` with one of these prefixes, followed by a reason (a bare prefix is ignored; other notes in `source_issues` never excuse a changed number):
 
 - `structure_reflowed: <reason>`: prose blocks were legitimately merged or removed (for example, OCR label fragments)
 - `untranslated_by_design: <reason>`: material intentionally kept in the source language (for example, a bibliography)

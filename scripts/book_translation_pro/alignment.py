@@ -9,6 +9,7 @@ from typing import Any
 
 from .artifacts import atomic_write_json, atomic_write_text, safe_project_path, validate_schema
 from .manifest import load_manifest
+from .structure import parse_blocks
 
 
 def _text_hash(text: str) -> str:
@@ -55,6 +56,20 @@ def create_segment_alignment(project: Path, config: dict[str, Any]) -> dict[str,
     return value
 
 
+def _paired_blocks(source: str, target: str) -> list[tuple[str, str]]:
+    """Pair a unit's blocks one to one when both sides have the same block shape.
+
+    The recorded alignment is per unit; a block-for-block pairing is only
+    shown when the kinds line up exactly (heading, paragraph, table, ...),
+    which is what the translation protocol produces.  Otherwise the unit is
+    shown whole rather than guessing which paragraph matches which.
+    """
+    source_blocks, target_blocks = parse_blocks(source), parse_blocks(target)
+    if len(source_blocks) > 1 and [block.kind for block in source_blocks] == [block.kind for block in target_blocks]:
+        return [(left.text, right.text) for left, right in zip(source_blocks, target_blocks)]
+    return [(source, target)]
+
+
 def render_bilingual_markdown(alignment: dict[str, Any], destination: Path | None = None) -> str:
     validate_schema(alignment, "segment-alignment.schema.json")
     blocks: list[str] = []
@@ -85,18 +100,19 @@ def render_bilingual_markdown(alignment: dict[str, Any], destination: Path | Non
         target_text = re.sub(
             r"\[\^([^]]+)\]", lambda match: f"[^{item['id']}-target-{match.group(1)}]", target_fragment
         )
-        blocks.extend([
-            f"::: {{.btp-source data-alignment-id=\"{item['id']}\"}}",
-            source_text,
-            "",
-            ":::",
-            "",
-            f"::: {{.btp-target data-alignment-id=\"{item['id']}\"}}",
-            "",
-            target_text,
-            "",
-            ":::",
-        ])
+        for number, (source_block, target_block) in enumerate(_paired_blocks(source_text, target_text), 1):
+            blocks.extend([
+                f"::: {{.btp-source data-alignment-id=\"{item['id']}\" data-block=\"{number}\"}}",
+                source_block,
+                "",
+                ":::",
+                "",
+                f"::: {{.btp-target data-alignment-id=\"{item['id']}\" data-block=\"{number}\"}}",
+                "",
+                target_block,
+                "",
+                ":::",
+            ])
     text = "\n".join(blocks).strip() + "\n"
     if destination is not None:
         atomic_write_text(destination, text)

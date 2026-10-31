@@ -128,7 +128,7 @@ btp status D:/Books/source-zh
 
 `typeset` 只生成供检查的排版候选，不会绕过 QA 或把项目标记为完成。Publication 模式还需要完成出版复核、例外记录和最终签核。
 
-`qa` 会阻断以下情况：译文段落少于原文（漏译）、译文长度不足原文一半（截断）、一半以上内容与原文逐字相同（未翻译）、数字或年份被改动、单元的依赖（原文、术语、风格指南、Capsule、配置）在翻译后已变化。确属有意的差异，在该单元的 observation 的 `source_issues` 中写明 `structure_reflowed: <原因>` 或 `untranslated_by_design: <原因>`（例如参考文献保留原文）。
+`qa` 会阻断以下情况：译文段落少于原文（漏译）、译文长度不足原文一半（截断）、一半以上内容与原文逐字相同（未翻译）、数字或年份被改动、单元的依赖（原文、术语、风格指南、Capsule、配置）在翻译后已变化。确属有意的差异，在该单元的 observation 的 `source_issues` 中写明 `structure_reflowed: <原因>` 或 `untranslated_by_design: <原因>`（例如参考文献保留原文）；原因不能为空，`source_issues` 里的其他备注不会让数字改动降级。表格单元格计入长度和未翻译检查，表格行变少会阻断。只有 Word 能生成目录：用 LibreOffice 导出的 PDF 若带目录，会因目录未生成而校验失败。
 
 修改 `book-project.yaml` 后运行 `btp prepare`：只影响输出或排版的改动会直接生效，不重新提取；改动原文、分块或视觉设置时需要 `prepare --rebuild`。重建会保留已有译文、编辑稿、原文未变单元的 Capsule 和审核记录，`plan` 只重排原文实际变化的单元；已不存在的单元文件会移到 `target/orphaned/`。
 

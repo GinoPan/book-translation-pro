@@ -169,23 +169,42 @@ QA_TARGET = (
 
 def qa_unit(root: Path, target: str, source: str = QA_SOURCE, source_issues: list[str] | None = None) -> dict:
     """Record one translated unit against ``source`` and return the QA report."""
-    config, _ = make_project(root)
-    unit_source = root / "source-work" / "work-units" / "unit-0001.md"
-    atomic_write_text(unit_source, source)
+    return qa_units(root, [(source, target)], source_issues)
+
+
+def qa_units(root: Path, pairs: list[tuple[str, str]], source_issues: list[str] | None = None) -> dict:
+    """Record consecutive ``(source, target)`` units and return the QA report."""
+    config, _ = make_project(root, unit_count=len(pairs))
     manifest = load_json(root / "state" / "manifest.json")
-    manifest["units"][0]["source_hash"] = sha256_file(unit_source)
+    for index, (source, _target) in enumerate(pairs):
+        unit_source = root / "source-work" / "work-units" / f"unit-{index + 1:04d}.md"
+        atomic_write_text(unit_source, source)
+        manifest["units"][index]["source_hash"] = sha256_file(unit_source)
     atomic_write_json(root / "state" / "manifest.json", manifest)
-    atomic_write_json(root / "state" / "observations" / "unit-0001.json", {
-        "schema_version": 1, "new_entries": [], "conflicts": [],
-        "source_issues": source_issues or [], "used_glossary_ids": [],
-    })
     record_review(root, "terminology", True, "tester", "approved")
-    for kind, folder in (("draft", "draft"), ("edit", "edited")):
-        atomic_write_text(root / "target" / folder / "unit-0001.md", target)
-        if kind == "draft":
-            dispatch_unit(root, "unit-0001")
-        record_text_output(root, "unit-0001", kind)
+    for index, (_source, target) in enumerate(pairs):
+        unit_id = f"unit-{index + 1:04d}"
+        atomic_write_json(root / "state" / "observations" / f"{unit_id}.json", {
+            "schema_version": 1, "new_entries": [], "conflicts": [],
+            "source_issues": source_issues or [], "used_glossary_ids": [],
+        })
+        for kind, folder in (("draft", "draft"), ("edit", "edited")):
+            atomic_write_text(root / "target" / folder / f"{unit_id}.md", target)
+            if kind == "draft":
+                dispatch_unit(root, unit_id)
+            record_text_output(root, unit_id, kind)
     return run_qa(root, config)
+
+
+def unit_statuses(report: dict, check_id: str, unit_id: str) -> list[str]:
+    return [item["status"] for item in report["checks"] if item["id"] == check_id and item.get("unit_id") == unit_id]
+
+
+LEDGER_SOURCE = (
+    "# Chapter 2 The Ledger\n\n"
+    "The ledger covered every station and recorded each repair made during the busy winter months.\n"
+)
+LEDGER_TARGET = "# 第 2 章 账簿\n\n账簿涵盖了每个工位，并记录了繁忙冬季月份里的每一次维修。\n"
 
 
 def statuses(report: dict, check_id: str) -> list[str]:
@@ -227,6 +246,79 @@ class QualityGates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             report = qa_unit(Path(temp), QA_TARGET.replace("1998", "1989"))
             self.assertEqual(statuses(report, "content.numbers"), ["fail"])
+
+    def test_unrelated_source_issue_does_not_excuse_a_changed_year(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), QA_TARGET.replace("1998", "1989"), source_issues=["typo on source page 3"])
+            self.assertEqual(statuses(report, "content.numbers"), ["fail"])
+
+    def test_bare_reflow_prefix_does_not_excuse_an_omission(self) -> None:
+        dropped = QA_TARGET.replace("操作员在班次开始前检查每个工位，并解释了这一习惯为何重要。\n\n", "")
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), dropped, source_issues=["structure_reflowed:"])
+            self.assertEqual(statuses(report, "content.block_coverage"), ["fail"])
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), dropped, source_issues=["structure_reflowed: merged OCR label fragments"])
+            self.assertEqual(statuses(report, "content.block_coverage"), ["warn"])
+
+    def test_small_count_is_excused_only_when_the_other_side_spells_it(self) -> None:
+        source = QA_SOURCE.replace("each station", "each of the five stations")
+        with tempfile.TemporaryDirectory() as temp:
+            spelled = qa_unit(Path(temp), QA_TARGET.replace("每个工位，并解释", "全部 5 个工位，并解释"), source)
+            self.assertEqual(statuses(spelled, "content.numbers"), ["warn"])
+        source = QA_SOURCE.replace("each station", "each of the 12 stations")
+        with tempfile.TemporaryDirectory() as temp:
+            changed = qa_unit(Path(temp), QA_TARGET.replace("每个工位，并解释", "全部 13 个工位，并解释"), source)
+            self.assertEqual(statuses(changed, "content.numbers"), ["fail"])
+
+    def test_number_moved_to_the_next_unit_is_a_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_units(Path(temp), [
+                (QA_SOURCE, QA_TARGET.replace("1998 年，", "")),
+                (LEDGER_SOURCE, LEDGER_TARGET.replace("账簿涵盖", "1998 年，账簿涵盖")),
+            ])
+            self.assertEqual(unit_statuses(report, "content.numbers", "unit-0001"), ["warn"])
+            self.assertEqual(unit_statuses(report, "content.numbers", "unit-0002"), ["warn"])
+
+    def test_common_year_next_door_does_not_excuse_a_changed_year(self) -> None:
+        both_years = " It mentions 1989 and 1998 again."
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_units(Path(temp), [
+                (QA_SOURCE, QA_TARGET.replace("1998", "1989")),
+                (LEDGER_SOURCE.replace("months.", "months." + both_years), LEDGER_TARGET + "它再次提到 1989 年和 1998 年。\n"),
+            ])
+            self.assertEqual(unit_statuses(report, "content.numbers", "unit-0001"), ["fail"])
+
+    def test_one_sentence_left_in_english_is_reported(self) -> None:
+        sentence = "Operators reviewed each station before the shift began, and they explained why that habit mattered."
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), QA_TARGET.replace("操作员在班次开始前检查每个工位，", sentence + "操作员"))
+            self.assertEqual(statuses(report, "content.untranslated"), ["warn"])
+
+    TABLE = (
+        "\n| Station | Duty |\n|---|---|\n"
+        "| Press line | Checks the hydraulic seals before every single shift |\n"
+        "| Paint shop | Records the booth humidity at the start of each hour |\n"
+    )
+    TABLE_TARGET = (
+        "\n| 工位 | 职责 |\n|---|---|\n"
+        "| 冲压线 | 每个班次前检查液压密封件 |\n"
+        "| 喷漆车间 | 每小时开始时记录喷漆室湿度 |\n"
+    )
+
+    def test_table_left_untranslated_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), QA_TARGET + self.TABLE, QA_SOURCE + self.TABLE)
+            self.assertEqual(statuses(report, "content.untranslated"), ["warn"])
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), QA_TARGET + self.TABLE_TARGET, QA_SOURCE + self.TABLE)
+            self.assertEqual(statuses(report, "content.untranslated"), [])
+
+    def test_dropped_table_row_fails(self) -> None:
+        dropped = self.TABLE_TARGET.replace("| 喷漆车间 | 每小时开始时记录喷漆室湿度 |\n", "")
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), QA_TARGET + dropped, QA_SOURCE + self.TABLE)
+            self.assertEqual(statuses(report, "structure.tables"), ["fail"])
 
     def test_style_guide_change_makes_recorded_translation_stale(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
