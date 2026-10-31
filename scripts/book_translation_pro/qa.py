@@ -11,7 +11,7 @@ from typing import Any
 
 from .artifacts import BTPError, atomic_write_json, atomic_write_text, hash_data, load_json, portable_path, safe_project_path, sha256_file, validate_schema
 from .exceptions import approved_exception_ids
-from .glossary import load_effective_glossary, select_entries
+from .glossary import load_effective_glossary, select_entries, target_matches
 from .manifest import load_manifest, validate_manifest_sources
 from .config import config_drifted
 from .state import load_state, now_utc, recorded_dependencies, save_state, unit_dependencies
@@ -214,6 +214,12 @@ def _canonicalize_numbers(text: str) -> str:
     return text
 
 
+# Full-width digits and signs are the same values in East Asian typesetting.
+_FULLWIDTH_NUMERALS = str.maketrans("０１２３４５６７８９．％", "0123456789.%")
+_CHINESE_DIGIT_VALUES = {character: str(value) for value, character in enumerate("〇一二三四五六七八九")} | {"零": "0"}
+_CHINESE_YEAR_RE = re.compile(r"([〇零一二三四五六七八九]{4})(?=\s*年)")
+
+
 def _number_tokens(markdown: str) -> Counter[str]:
     text = _comparison_text(markdown)
     # Written ``percent`` and the symbol are equivalent, including when a
@@ -226,6 +232,9 @@ def _number_tokens(markdown: str) -> Counter[str]:
         text,
         flags=re.IGNORECASE,
     )
+    text = text.translate(_FULLWIDTH_NUMERALS)
+    # "一九九八年" is the year 1998.
+    text = _CHINESE_YEAR_RE.sub(lambda match: "".join(_CHINESE_DIGIT_VALUES[char] for char in match.group(1)), text)
     text = _canonicalize_numbers(text)
     tokens = Counter()
     for match in NUMBER_RE.finditer(text):
@@ -360,7 +369,7 @@ TRUNCATION_WARN_RATIO = 0.7
 EXPANSION_WARN_RATIO = 2.0
 COPIED_BLOCK_MIN_WORDS = 6
 COPIED_SHARE_FAIL = 0.5
-_SENTENCE_END_RE = re.compile(r"(?<=[.!?…])\s+")
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?…])\s+|(?<=[。！？])")
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)])\s+", re.MULTILINE)
 
 
@@ -456,7 +465,8 @@ def _coverage_checks(
     )
     copied = [
         piece for piece in pieces
-        if len(_WORD_RE.findall(_CJK_RE.sub(" ", piece))) >= COPIED_BLOCK_MIN_WORDS and piece in normalized_target
+        # Script-neutral size, so a CJK sentence left untranslated counts too.
+        if _prose_weight(piece) >= COPIED_BLOCK_MIN_WORDS and piece in normalized_target
     ]
     if copied and target_weight:
         share = min(1.0, sum(_prose_weight(piece) for piece in copied) / target_weight)
@@ -659,7 +669,7 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             _check(checks, "content.urls", "fail", "URLs changed", unit_id)
 
         for term in select_entries(glossary, source, entry["book_node_id"]):
-            if term["target"] not in target:
+            if not target_matches(term, target):
                 _check(checks, "terminology.approved", "fail", f"Approved target missing for {term['source']!r}: {term['target']!r}", unit_id)
 
         draft_path = safe_project_path(project, entry["draft_file"])

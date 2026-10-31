@@ -157,6 +157,15 @@ class FigureAuditTests(unittest.TestCase):
             )
             self.assertEqual(run_figure_audit(root, config)["figures"][0]["disposition"], "target_asset")
 
+    def test_short_sentences_citing_an_exhibit_are_not_captions(self) -> None:
+        from book_translation_pro.figures import _caption_matches
+
+        for prose in ("图 3 给出总览。", "图 3.2 显示，产量在 1930 年达到峰值。", "Figure 3 shows the output of the mill."):
+            self.assertEqual(_caption_matches(prose), [], prose)
+        for caption in ("图表 1.1 1910 年的工厂车间。", "图 1.2：产量总览", "Figure 1.1 The factory floor in 1910.",
+                        "Figure 3: overview of output"):
+            self.assertTrue(_caption_matches(caption), caption)
+
     def test_long_paragraph_opening_with_a_label_is_prose(self) -> None:
         prose = "图表 1.1 显示了工厂在十年间的产量变化，" + "其中每个工位的记录都由工头在周五晚上核对并汇总到总账中，" * 3
         with tempfile.TemporaryDirectory() as directory:
