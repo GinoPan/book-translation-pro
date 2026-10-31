@@ -91,7 +91,13 @@ SECTION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?(?:[\s　]+).+")
 CHAPTER_NUMBER_RE = re.compile(r"^\d{1,2}$")
 CHAPTER_TITLE_RE = re.compile(r"^\d{1,2}[\s　]+.+")
 PART_RE = re.compile(r"^第[一二三四五六七八九十百0-9]+部分(?:[\s　]+.*)?$")
-CHAPTER_CN_RE = re.compile(r"^第\d{1,3}章(?:[:：.、\s]|$)")
+CHAPTER_CN_RE = re.compile(r"^第\s*[0-9一二三四五六七八九十百零〇两]{1,6}\s*章(?:[:：.、\s]|$)")
+_ENGLISH_ORDINAL = (
+    r"(?:\d{1,3}|[IVXLC]{1,7}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
+    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|(?:twenty|thirty|forty|fifty)(?:[-\s][a-z]+)?)"
+)
+CHAPTER_EN_RE = re.compile(rf"^chapter\s+{_ENGLISH_ORDINAL}\b", re.IGNORECASE)
+PART_EN_RE = re.compile(rf"^part\s+{_ENGLISH_ORDINAL}\b", re.IGNORECASE)
 SUBSECTION_RE = re.compile(r"^[（(][a-zA-Z一二三四五六七八九十]+[）)]\s*.+")
 FRONT_TITLES = {
     "前言", "序言", "序", "引言", "导言", "内容提要", "摘要", "编者按", "出版说明",
@@ -100,6 +106,8 @@ FRONT_TITLES = {
     "acknowledgments", "acknowledgements", "copyright", "title page",
 }
 TOC_TITLES = {"目录", "contents", "table of contents"}
+# Shown by the TOC field until Word refreshes it; LibreOffice never does.
+TOC_FIELD_PLACEHOLDER = "更新目录"
 TRAILING_RECOVERY_TITLES = {
     "OCR 恢复的源页面", "OCR恢复的源页面", "OCR recovered source pages",
 }
@@ -351,6 +359,11 @@ def validate_docx_package(path: Path, require_toc: bool = False) -> dict[str, An
                 document_xml = archive.read("word/document.xml").decode("utf-8", errors="replace")
                 if require_toc and "TOC" not in document_xml:
                     errors.append("native Word TOC field is missing")
+                elif require_toc and TOC_FIELD_PLACEHOLDER in document_xml:
+                    warnings.append(
+                        "TOC field was not refreshed (Microsoft Word unavailable); it shows a placeholder "
+                        "until the DOCX is opened in Word and its fields are updated"
+                    )
             if "word/styles.xml" not in names:
                 errors.append("word/styles.xml is missing")
             elif "word/document.xml" in names:
@@ -394,6 +407,11 @@ def validate_pdf_package(path: Path) -> dict[str, Any]:
                 text = page.get_text()
                 if "Error!" in text or "Reference source not found" in text:
                     errors.append(f"PDF contains a Word field error on page {page_number}")
+                if TOC_FIELD_PLACEHOLDER in text:
+                    errors.append(
+                        f"PDF shows an unbuilt table of contents on page {page_number}; only Microsoft Word "
+                        "fills the TOC field, so export the PDF on a host with Word"
+                    )
     except ImportError:
         warnings.append("PyMuPDF is unavailable; PDF text-level field-error scan was skipped")
     except (OSError, RuntimeError) as exc:
@@ -1766,7 +1784,12 @@ def _set_page_number_format(section: Any, fmt: str, start: int | None) -> None:
     node = sect_pr.find(qn("w:pgNumType"))
     if node is None:
         node = OxmlElement("w:pgNumType")
-        sect_pr.append(node)
+        # CT_SectPr is an ordered sequence; strict consumers reject a
+        # pgNumType after docGrid.
+        sect_pr.insert_element_before(
+            node, "w:cols", "w:formProt", "w:vAlign", "w:noEndnote", "w:titlePg", "w:textDirection",
+            "w:bidi", "w:rtlGutter", "w:docGrid", "w:printerSettings", "w:sectPrChange",
+        )
     node.set(qn("w:fmt"), fmt)
     if start is None:
         node.attrib.pop(qn("w:start"), None)
@@ -1774,22 +1797,48 @@ def _set_page_number_format(section: Any, fmt: str, start: int | None) -> None:
         node.set(qn("w:start"), str(start))
 
 
+def _is_part_title(text: str) -> bool:
+    return bool(PART_RE.match(text) or PART_EN_RE.match(text))
+
+
+def _body_headings(document: Any) -> tuple[list[Any], list[Any]]:
+    """Split Heading 1 paragraphs into front matter and the body that opens a chapter or part."""
+    headings = [paragraph for paragraph in document.paragraphs if paragraph.style.name == "Heading 1"]
+    start = next((
+        index for index, paragraph in enumerate(headings)
+        if _is_part_title(text := paragraph.text.strip())
+        or CHAPTER_TITLE_RE.match(text) or CHAPTER_CN_RE.match(text) or CHAPTER_EN_RE.match(text)
+    ), None)
+    if start is None:
+        # Unnumbered chapters ("The Machine Age"): the body opens at the
+        # first heading that is not a front-matter or contents title.
+        front = {title.casefold() for title in (*FRONT_TITLES, *TOC_TITLES)}
+        start = next((
+            index for index, paragraph in enumerate(headings)
+            if paragraph.text.strip().casefold() not in front
+        ), len(headings))
+    # A heading directly under a heading of the same rank (the source and
+    # target titles of a bilingual edition) shares its opener page; a part
+    # title followed by its first chapter still opens two sections.
+    openers: list[Any] = []
+    for paragraph in headings[start:]:
+        previous = openers[-1] if openers else None
+        if (
+            previous is not None and paragraph._p.getprevious() is previous._p
+            and _is_part_title(previous.text.strip()) == _is_part_title(paragraph.text.strip())
+        ):
+            continue
+        openers.append(paragraph)
+    return headings[:start], openers
+
+
 def _add_book_sections(document: Any) -> None:
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
-    headings = []
-    body_started = False
-    for paragraph in document.paragraphs:
-        if paragraph.style.name != "Heading 1":
-            continue
-        text = paragraph.text.strip()
-        if PART_RE.match(text) or CHAPTER_TITLE_RE.match(text) or CHAPTER_CN_RE.match(text):
-            body_started = True
-        if body_started:
-            headings.append(paragraph)
-        else:
-            paragraph.paragraph_format.page_break_before = True
+    front, headings = _body_headings(document)
+    for paragraph in front:
+        paragraph.paragraph_format.page_break_before = True
     if not headings:
         return
     base = document.sections[-1]._sectPr
@@ -2294,26 +2343,20 @@ def _configure_section_layout(document: Any, options: dict[str, Any]) -> None:
 
     front = document.sections[0]
     front.different_first_page_header_footer = True
-    _set_page_number_format(front, "lowerRoman", 1)
+    # A single-section document has no front matter to number in roman.
+    _set_page_number_format(front, "lowerRoman" if len(document.sections) > 1 else "decimal", 1)
     for story in (front.header, front.even_page_header, front.first_page_header):
         _clear_paragraph(story.paragraphs[0])
-    _clear_paragraph(front.footer.paragraphs[0])
-    front.footer.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _append_field(front.footer.paragraphs[0], "PAGE")
+    # evenAndOddHeaders is always on, so verso pages need their own folio.
+    for story in (front.footer, front.even_page_footer):
+        _clear_paragraph(story.paragraphs[0])
+        story.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _append_field(story.paragraphs[0], "PAGE")
     _clear_paragraph(front.first_page_footer.paragraphs[0])
 
     if len(document.sections) < 2:
         return
-    section_titles = []
-    body_started = False
-    for paragraph in document.paragraphs:
-        if paragraph.style.name != "Heading 1":
-            continue
-        text = paragraph.text.strip()
-        if PART_RE.match(text) or CHAPTER_TITLE_RE.match(text) or CHAPTER_CN_RE.match(text):
-            body_started = True
-        if body_started:
-            section_titles.append(text)
+    section_titles = [paragraph.text.strip() for paragraph in _body_headings(document)[1]]
     folio_in_header = options.get("folio_position") == "header"
     for index, section in enumerate(document.sections[1:]):
         section_title = section_titles[index] if index < len(section_titles) else options["title"]
@@ -2345,7 +2388,7 @@ def _configure_section_layout(document: Any, options: dict[str, Any]) -> None:
         if not folio_in_header:
             _append_field(section.footer.paragraphs[0], "PAGE")
             _append_field(section.even_page_footer.paragraphs[0], "PAGE")
-        if not PART_RE.match(section_title):
+        if not _is_part_title(section_title):
             section.first_page_footer.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             _append_field(section.first_page_footer.paragraphs[0], "PAGE")
 
@@ -2366,7 +2409,7 @@ def postprocess_docx(path: Path, options: dict[str, Any]) -> None:
     for paragraph in document.paragraphs:
         if paragraph.text.strip() == "[[TOC]]":
             _clear_paragraph(paragraph)
-            _append_field(paragraph, f'TOC \\o "1-{options["toc_depth"]}" \\h \\z \\u', "更新目录")
+            _append_field(paragraph, f'TOC \\o "1-{options["toc_depth"]}" \\h \\z \\u', TOC_FIELD_PLACEHOLDER)
     _add_book_sections(document)
     document.save(path)
 

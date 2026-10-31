@@ -26,17 +26,24 @@ from .structure import IMAGE_RE
 
 
 SOURCE_CAPTION_RE = re.compile(
-    r"^\s*(EXHIBIT|FIGURE|TABLE)\s+([0-9]+(?:\.[0-9]+)*[A-Z]?)\s*$",
-    re.IGNORECASE,
+    r"^\s*(?i:(exhibit|figure|fig\.|table|chart|plate|illustration|map))\s*"
+    r"((?i:[0-9]+(?:[.\-–][0-9]+)*[a-z]?)|[IVXLC]+)"
+    # A caption label ends the line or is followed by a separator or a
+    # capitalized title; prose citing a figure continues in lower case
+    # ("Figure 3 shows ...").
+    r"(?=\s*$|\s*[:：.．\-–—|]|\s+[A-Z\"'“‘]|\s*[^\x00-\x7f])"
 )
-TARGET_CAPTION_RE = re.compile(
-    r"(?:图表|图|表)\s*([0-9]+(?:\.[0-9]+)*[A-Z]?)",
-    re.IGNORECASE,
-)
+# A list-of-figures entry: the title runs into a dot leader and a page number.
+LIST_LEADER_RE = re.compile(r"(?:\.\s*){4,}\S*\s*$|…{2,}")
+_CAPTION_KEY = r"([0-9]+(?:[.\-–][0-9]+)*[A-Z]?|[IVXLC]+\b)"
+_TARGET_LABELS = r"(?:图表|插图|图|表|exhibit|figure|fig\.|table|chart|plate|illustration|map)"
+TARGET_CAPTION_RE = re.compile(_TARGET_LABELS + r"\s*" + _CAPTION_KEY, re.IGNORECASE)
 MARKED_TARGET_CAPTION_RE = re.compile(
-    r"\*\*\s*(?:图表|图|表)\s*([0-9]+(?:\.[0-9]+)*[A-Z]?)(?=[\s*／/（(])",
+    r"\*\*\s*" + _TARGET_LABELS + r"\s*" + _CAPTION_KEY + r"(?=[\s*／/（(:：.])",
     re.IGNORECASE,
 )
+# Target caption labels are recognized for these target languages only.
+CAPTION_LANGUAGES = ("zh", "en")
 PRINT_LAYOUT_LINE_RE = re.compile(
     r"\b[A-Za-z0-9_.-]+\.(?:qxd|indd)\s+\d{1,2}/\d{1,2}/\d{2,4}\s+"
     r"\d{1,2}:\d{2}\s+(?:AM|PM)\s+Page\s+(?:[ivxlcdm]+|\d+)\b",
@@ -100,17 +107,20 @@ def _source_exhibits(project: Path, config: dict[str, Any]) -> list[dict[str, An
             matches: list[dict[str, Any]] = []
             for block in page.get_text("dict").get("blocks", []):
                 for line in block.get("lines", []):
-                    for span in line.get("spans", []):
-                        text = " ".join(str(span.get("text", "")).split())
-                        match = SOURCE_CAPTION_RE.match(text)
-                        if not match or float(span.get("size", 99)) > 12:
-                            continue
-                        matches.append({
-                            "kind": match.group(1).casefold(),
-                            "key": match.group(2).upper(),
-                            "bbox": [round(float(value), 2) for value in span["bbox"]],
-                            "font_size": round(float(span.get("size", 0)), 2),
-                        })
+                    # A label and its number may sit in separate spans
+                    # ("**Figure** 3.2"), so match the whole line.
+                    spans = [span for span in line.get("spans", []) if str(span.get("text", "")).strip()]
+                    text = " ".join(" ".join(str(span["text"]) for span in spans).split())
+                    match = SOURCE_CAPTION_RE.match(text)
+                    if not match or float(spans[0].get("size", 99)) > 12 or LIST_LEADER_RE.search(text):
+                        continue
+                    kind = match.group(1).casefold().rstrip(".")
+                    matches.append({
+                        "kind": "figure" if kind == "fig" else kind,
+                        "key": _caption_key(match.group(2)),
+                        "bbox": [round(float(value), 2) for value in line["bbox"]],
+                        "font_size": round(float(spans[0].get("size", 0)), 2),
+                    })
             if not matches:
                 continue
             drawings = page.get_drawings()
@@ -126,6 +136,29 @@ def _source_exhibits(project: Path, config: dict[str, Any]) -> list[dict[str, An
                     "source_drawing_count": len(drawings),
                 })
     return exhibits
+
+
+def _uncaptioned_visual_pages(project: Path, config: dict[str, Any]) -> list[int]:
+    """Pages that carry an image or a drawing as busy as a figure (see ``_source_exhibits``)."""
+    import fitz
+
+    with fitz.open(safe_project_path(project, config["source"]["path"])) as document:
+        return [
+            number for number, page in enumerate(document, 1)
+            if page.get_images(full=True) or len(page.get_drawings()) >= 3
+        ]
+
+
+def _caption_key(value: str) -> str:
+    return value.upper().replace("–", "-")
+
+
+def _caption_class(label: str) -> str:
+    """Group caption labels so Figure 1 and Table 1 stay separate exhibits."""
+    label = label.casefold().lstrip("*").strip()
+    if label.startswith("图表") or label.startswith("exhibit"):
+        return "exhibit"
+    return "table" if label.startswith(("表", "table")) else "figure"
 
 
 def _figure_asset_name(key: str) -> str:
@@ -261,7 +294,7 @@ def _apply_target_figure_repairs(
         caption_positions = [
             index for index, line in enumerate(caption_lines)
             if key in {
-                match.group(1).upper()
+                _caption_key(match.group(1))
                 for match in MARKED_TARGET_CAPTION_RE.finditer(re.sub(r"<[^>]+>", "", line))
             }
         ]
@@ -324,13 +357,13 @@ def _apply_target_figure_repairs(
                 # caption of any key would plant the image above the wrong
                 # exhibit.
                 own_marked = any(
-                    match.group(1).upper() == key
+                    _caption_key(match.group(1)) == key
                     for match in MARKED_TARGET_CAPTION_RE.finditer(plain)
                 )
                 own_heading = (
                     line.lstrip().startswith("#")
                     and any(
-                        match.group(1).upper() == key
+                        _caption_key(match.group(1)) == key
                         for match in TARGET_CAPTION_RE.finditer(plain)
                     )
                 )
@@ -812,7 +845,11 @@ def reconstruct_figures(
     for exhibit in source_exhibits:
         if wanted is not None and exhibit["key"] not in wanted:
             continue
-        unique.setdefault(exhibit["key"], exhibit)
+        # A caption also listed on a text-only page (a list of figures)
+        # must be cropped from the page that carries the visual.
+        current = unique.get(exhibit["key"])
+        if current is None or (current["source_visual"] == "text_only" and exhibit["source_visual"] != "text_only"):
+            unique[exhibit["key"]] = exhibit
 
     generated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -949,11 +986,12 @@ def _target_caption_units(project: Path, config: dict[str, Any]) -> dict[str, li
                 continue
             matches = marked or list(TARGET_CAPTION_RE.finditer(plain))
             for match in matches:
-                key = match.group(1).upper()
+                key = _caption_key(match.group(1))
                 item = {
                     "unit_id": path.stem,
                     "path": portable_path(path, project),
                     "caption_line": line.strip(),
+                    "kind": _caption_class(match.group(0)),
                 }
                 if item not in result.setdefault(key, []):
                     result[key].append(item)
@@ -983,7 +1021,7 @@ def _declared_structured_reconstruction(issues: list[str]) -> list[str]:
 def run_figure_audit(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     """Inventory source exhibits and audit their target visual disposition."""
     source_exhibits = _source_exhibits(project, config)
-    if not source_exhibits:
+    if config.get("source", {}).get("format") != "pdf":
         report = {
             "schema_version": 1,
             "status": "not_applicable",
@@ -995,11 +1033,23 @@ def run_figure_audit(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         atomic_write_text(project / "qa" / "figure-audit.md", "# Figure Audit\n\nNot applicable to this source format.\n")
         return report
 
+    audit_warnings: list[str] = []
+    if not source_exhibits:
+        # No recognized caption is a pass only when the PDF has no visuals;
+        # otherwise the captions may simply use a form the pattern misses.
+        visual_pages = _uncaptioned_visual_pages(project, config)
+        if visual_pages:
+            audit_warnings.append(
+                f"No figure or table captions were recognized, but {len(visual_pages)} source page(s) carry images "
+                f"or vector drawings (first: {', '.join(map(str, visual_pages[:8]))}); check their exhibits by hand"
+            )
+    language = str(config["target"]["language"]).lower()
+    captions_recognized = language.startswith(CAPTION_LANGUAGES)
     targets = _target_caption_units(project, config)
-    unique: dict[str, dict[str, Any]] = {}
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
     for item in source_exhibits:
         key = item["key"]
-        current = unique.setdefault(key, {
+        current = unique.setdefault((_caption_class(item["kind"]), key), {
             "key": key,
             "kind": item["kind"],
             "source_pages": [],
@@ -1013,10 +1063,20 @@ def run_figure_audit(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         current["source_drawing_count"] += item["source_drawing_count"]
 
     figures: list[dict[str, Any]] = []
-    for key in sorted(unique, key=lambda value: tuple(int(part.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ")) for part in value.split(".") if part.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ").isdigit())):
-        item = unique[key]
-        caption_units = targets.get(key, [])
+    def order(entry: tuple[str, str]) -> tuple[tuple[int, ...], str, str]:
+        parts = re.split(r"[.\-]", entry[1])
+        return tuple(int(part.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ")) for part in parts if part.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ").isdigit()), entry[1], entry[0]
+
+    for exhibit_class, key in sorted(unique, key=order):
+        item = unique[exhibit_class, key]
+        # A target "图表"/"Exhibit" label fits any source kind; otherwise a
+        # figure caption must not satisfy the table of the same number.
+        caption_units = [
+            entry for entry in targets.get(key, [])
+            if "exhibit" in (exhibit_class, entry["kind"]) or exhibit_class == entry["kind"]
+        ]
         unit_ids = sorted({entry["unit_id"] for entry in caption_units})
+        label = f"{item['kind'].capitalize()} {key}"
         image_refs: Counter[str] = Counter()
         issues: list[str] = []
         table_signal_count = 0
@@ -1031,23 +1091,27 @@ def run_figure_audit(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         if image_refs:
             disposition = "target_asset"
             status = "pass"
-            message = f"Exhibit {key} has target visual asset(s)"
+            message = f"{label} has target visual asset(s)"
         elif table_signal_count >= 2:
             disposition = "native_table_reconstruction"
             status = "warn"
-            message = f"Exhibit {key} has no image asset but is represented by a native target table"
+            message = f"{label} has no image asset but is represented by a native target table"
         elif structured:
             disposition = "declared_structured_reconstruction"
             status = "warn"
-            message = f"Exhibit {key} has no image asset; declared reconstruction evidence: {', '.join(structured[:4])}"
+            message = f"{label} has no image asset; declared reconstruction evidence: {', '.join(structured[:4])}"
         elif not caption_units:
             disposition = "missing_target_caption"
-            status = "fail"
-            message = f"Exhibit {key} has no mapped target caption or visual asset"
+            # Captions in other target languages cannot be recognized, so
+            # their absence is reported but cannot be judged.
+            status = "fail" if captions_recognized else "warn"
+            message = f"{label} has no mapped target caption or visual asset" + (
+                "" if captions_recognized else " (target caption labels are only recognized for Chinese and English)"
+            )
         else:
             disposition = "missing_visual_asset"
             status = "fail"
-            message = f"Exhibit {key} has a target caption but no visual asset or reconstruction record"
+            message = f"{label} has a target caption but no visual asset or reconstruction record"
         figures.append({
             **item,
             "source_pages": sorted(set(item["source_pages"])),
@@ -1072,7 +1136,8 @@ def run_figure_audit(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         "source_path": config["source"]["path"],
         "figure_count": len(figures),
         "failure_count": len(failures),
-        "warning_count": len(warnings),
+        "warning_count": len(warnings) + len(audit_warnings),
+        "warnings": audit_warnings,
         "figures": figures,
     }
     atomic_write_json(project / "qa" / "figure-audit.json", report)
@@ -1081,11 +1146,12 @@ def run_figure_audit(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         f"Figures: {report['figure_count']}",
         f"Failures: {report['failure_count']}",
         f"Warnings: {report['warning_count']}", "",
+        *(f"- warn: {warning}" for warning in audit_warnings), *([""] if audit_warnings else []),
         "| Status | Exhibit | Source pages | Target units | Disposition |", "|---|---|---|---|---|",
     ]
     for item in figures:
         lines.append(
-            f"| {item['status']} | {item['key']} | {', '.join(map(str, item['source_pages']))} | "
+            f"| {item['status']} | {item['kind']} {item['key']} | {', '.join(map(str, item['source_pages']))} | "
             f"{', '.join(item['target_units']) or '-'} | {item['disposition']} |"
         )
     atomic_write_text(project / "qa" / "figure-audit.md", "\n".join(lines) + "\n")

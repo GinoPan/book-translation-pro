@@ -77,6 +77,29 @@ class V1ContractTests(unittest.TestCase):
             self.assertIn("轴承预紧为 10 mm", rendered)
             self.assertIn('data-alignment-id="align-0001"', rendered)
 
+    def test_bilingual_pairs_blocks_when_both_sides_have_the_same_shape(self) -> None:
+        def item(source: str, target: str) -> dict:
+            return {
+                "id": "align-0001", "order": 0, "unit_id": "unit-0001", "book_node_id": None,
+                "source_segment_ids": ["seg-000001"], "source_text": source, "target_text": target,
+                "source_sha256": "a" * 64, "target_sha256": "b" * 64,
+            }
+
+        def render(source: str, target: str) -> str:
+            return render_bilingual_markdown({
+                "schema_version": 1, "source_fingerprint": "a" * 64, "target_language": "zh-Hans",
+                "items": [item(source, target)],
+            })
+
+        paired = render("# Bearing\n\nFirst paragraph.\n\nSecond paragraph.", "# 轴承\n\n第一段。\n\n第二段。")
+        blocks = [line for line in paired.splitlines() if line.startswith(":::") and "{" in line]
+        self.assertEqual(len(blocks), 6)
+        self.assertLess(paired.index("First paragraph."), paired.index("第一段。"))
+        self.assertLess(paired.index("第一段。"), paired.index("Second paragraph."))
+        # A merged paragraph changes the shape, so the unit is shown whole.
+        whole = render("# Bearing\n\nFirst paragraph.\n\nSecond paragraph.", "# 轴承\n\n第一段。第二段。")
+        self.assertEqual(len([line for line in whole.splitlines() if line.startswith(":::") and "{" in line]), 2)
+
     def test_project_glossary_overlays_reusable_library(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

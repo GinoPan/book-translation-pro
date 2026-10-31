@@ -25,7 +25,7 @@ from .publication import (
 )
 from .rights import publication_rights_issues, rights_warning
 from .structure import IMAGE_RE, parse_blocks
-from .figures import run_figure_audit
+from .figures import STRUCTURED_RECONSTRUCTION_PREFIXES, run_figure_audit
 from .visual import run_visual_qa
 
 
@@ -129,11 +129,42 @@ _ORDINAL_WORD_VALUES = {
     "eightieth": 80, "ninetieth": 90,
 }
 _SMALL_INTEGER_RE = re.compile(r"^\d{1,2}$")
+_ENGLISH_UNITS = (
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen "
+    "fourteen fifteen sixteen seventeen eighteen nineteen"
+).split()
+_ENGLISH_TENS = {2: "twenty", 3: "thirty", 4: "forty", 5: "fifty", 6: "sixty", 7: "seventy", 8: "eighty", 9: "ninety"}
+_CHINESE_DIGITS = "零一二三四五六七八九"
 _MAGNITUDE_FACTORS = {
     "thousand": 1_000, "million": 1_000_000, "billion": 1_000_000_000,
     "trillion": 1_000_000_000_000, "万": 10_000, "亿": 100_000_000,
     "亿万": 100_000_000,
 }
+
+
+def _spelled_forms(value: int) -> set[str]:
+    """English and Chinese spellings of a count below 100."""
+    tens, ones = divmod(value, 10)
+    if value < 20:
+        english = {_ENGLISH_UNITS[value]}
+    elif ones:
+        english = {f"{_ENGLISH_TENS[tens]}-{_ENGLISH_UNITS[ones]}", f"{_ENGLISH_TENS[tens]} {_ENGLISH_UNITS[ones]}"}
+    else:
+        english = {_ENGLISH_TENS[tens]}
+    english |= {"first"} if value == 1 else {"second"} if value == 2 else set()
+    if value < 10:
+        chinese = {_CHINESE_DIGITS[value]} | ({"两"} if value == 2 else set())
+    else:
+        chinese = {("" if tens == 1 else _CHINESE_DIGITS[tens]) + "十" + (_CHINESE_DIGITS[ones] if ones else "")}
+    return english | chinese
+
+
+def _spells_number(text: str, value: int) -> bool:
+    folded = text.casefold()
+    return any(
+        re.search(rf"(?<![a-z]){re.escape(form)}(?![a-z])", folded) if form.isascii() else form in text
+        for form in _spelled_forms(value)
+    )
 
 
 def _canonical_number(value: str) -> str:
@@ -250,7 +281,9 @@ def _variation_status(
     observation: dict[str, Any],
 ) -> tuple[str, str]:
     """Classify unit-local differences without masking high-confidence edits."""
-    source_issues = observation.get("source_issues", [])
+    # Only a recorded reflow or reconstruction explains moved anchors; an
+    # unrelated note about the source (a typo, a missing page) does not.
+    source_issues = _evidence_issues(observation, NUMERIC_EVIDENCE_PREFIXES)
     # Compare content size, not raw characters: Chinese is about a third the
     # character count of equivalent English, which made every EN->ZH unit look
     # "reflowed" and downgraded real numeric errors to warnings.
@@ -280,10 +313,15 @@ def _variation_status(
             return "warn", "source/target numeric anchors differ after cleanup; evidence: unit reflow/reconstruction"
         # Small bare counts (2 products, 6 operations, "five times") are
         # spelled in either language by style; only their measurements are
-        # conserved word-for-word.  Everything else stays blocking so an
-        # ordinary 10 mm -> 11 mm edit remains detectable.
-        differing = (source_numbers - target_numbers) | (target_numbers - source_numbers)
-        if differing and all(_SMALL_INTEGER_RE.match(token) for token in differing):
+        # conserved word-for-word.  A count is excused only when the other
+        # side spells it out, so 12 -> 13 and 10 mm -> 11 mm stay blocking.
+        source_only = source_numbers - target_numbers
+        target_only = target_numbers - source_numbers
+        if (source_only or target_only) and all(
+            _SMALL_INTEGER_RE.match(token) and _spells_number(other, int(token))
+            for difference, other in ((source_only, target), (target_only, source))
+            for token in difference
+        ):
             return "warn", "small-count numerals spelled differently between languages"
         return "fail", f"Numbers or units changed (source-only: {_compact_counter(source_numbers - target_numbers)}; target-only: {_compact_counter(target_numbers - source_numbers)})"
     if check_id == "content.formulas":
@@ -291,6 +329,9 @@ def _variation_status(
             evidence = ", ".join(source_issues[:4]) or "unit reflow/reconstruction"
             return "warn", f"formula-like layout differs after cleanup; evidence: {evidence}"
         return "fail", "Formula structure changed"
+    if check_id == "structure.tables" and _table_signals(target) < _table_signals(source) and not source_issues:
+        return "fail", (f"Target has {_table_signals(target)} table rows but the source has {_table_signals(source)}; "
+                        "a row may have been dropped")
     return "warn", "unit-local structure was reflowed or reconstructed; book-level inventory is authoritative"
 
 
@@ -304,12 +345,16 @@ PROSE_KINDS = {"paragraph", "list", "heading"}
 # Observation evidence that legitimately removes or merges prose blocks.
 STRUCTURE_EVIDENCE_PREFIXES = ("source_figure_reconstructed", "source_cover_rebuilt", "structure_reflowed")
 UNTRANSLATED_EVIDENCE_PREFIX = "untranslated_by_design"
+# Documented as ``prefix: <reason>``; a bare prefix explains nothing.
+REASONED_EVIDENCE_PREFIXES = ("structure_reflowed", UNTRANSLATED_EVIDENCE_PREFIX)
+NUMERIC_EVIDENCE_PREFIXES = STRUCTURE_EVIDENCE_PREFIXES + STRUCTURED_RECONSTRUCTION_PREFIXES
 MIN_RATIO_WEIGHT = 40
 TRUNCATION_FAIL_RATIO = 0.5
 TRUNCATION_WARN_RATIO = 0.7
 EXPANSION_WARN_RATIO = 2.0
 COPIED_BLOCK_MIN_WORDS = 6
 COPIED_SHARE_FAIL = 0.5
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?…])\s+")
 
 
 def _prose_weight(text: str) -> float:
@@ -327,8 +372,27 @@ def _prose_blocks(markdown: str) -> list[str]:
     ]
 
 
+def _table_cells(markdown: str) -> list[str]:
+    """Pipe-table cells that carry language; numeric and separator cells weigh 0."""
+    return [
+        cell.strip()
+        for segment in parse_blocks(_comparison_text(markdown)) if segment.kind == "table"
+        for line in segment.text.splitlines()
+        for cell in line.strip().strip("|").split("|")
+        if _prose_weight(cell) > 0
+    ]
+
+
+def _evidence_issues(observation: dict[str, Any], prefixes: tuple[str, ...] | str) -> list[str]:
+    return [
+        issue for issue in map(str, observation.get("source_issues", []))
+        if issue.startswith(prefixes)
+        and not (issue.startswith(REASONED_EVIDENCE_PREFIXES) and not issue.partition(":")[2].strip())
+    ]
+
+
 def _has_evidence(observation: dict[str, Any], prefixes: tuple[str, ...] | str) -> bool:
-    return any(str(issue).startswith(prefixes) for issue in observation.get("source_issues", []))
+    return bool(_evidence_issues(observation, prefixes))
 
 
 def _coverage_checks(
@@ -347,8 +411,11 @@ def _coverage_checks(
         _check(checks, "content.block_coverage", "warn",
                f"Target has {len(target_blocks)} prose blocks but the source has {len(source_blocks)}", unit_id)
 
-    source_weight = sum(_prose_weight(block) for block in source_blocks)
-    target_weight = sum(_prose_weight(block) for block in target_blocks)
+    # Table cells carry translatable language too, so they count toward size.
+    source_cells = _table_cells(source)
+    target_cells = _table_cells(target)
+    source_weight = sum(map(_prose_weight, [*source_blocks, *source_cells]))
+    target_weight = sum(map(_prose_weight, [*target_blocks, *target_cells]))
     if source_weight >= MIN_RATIO_WEIGHT:
         ratio = target_weight / source_weight
         message = f"Target content is {ratio:.0%} of the source length"
@@ -360,19 +427,24 @@ def _coverage_checks(
         elif ratio > EXPANSION_WARN_RATIO:
             _check(checks, "content.length_ratio", "warn", message + "; check for added content", unit_id)
 
-    normalized_source = {" ".join(block.split()) for block in source_blocks}
+    # Compare sentences and table cells, not whole blocks, so one sentence
+    # left in the source language inside a translated paragraph is visible.
+    normalized_target = " ".join(" ".join([*target_blocks, *target_cells]).split())
+    pieces = dict.fromkeys(
+        " ".join(piece.split())
+        for piece in [*(part for block in source_blocks for part in _SENTENCE_END_RE.split(block)), *source_cells]
+    )
     copied = [
-        block for block in target_blocks
-        if " ".join(block.split()) in normalized_source
-        and len(_WORD_RE.findall(_CJK_RE.sub(" ", block))) >= COPIED_BLOCK_MIN_WORDS
+        piece for piece in pieces
+        if len(_WORD_RE.findall(_CJK_RE.sub(" ", piece))) >= COPIED_BLOCK_MIN_WORDS and piece in normalized_target
     ]
     if copied and target_weight:
-        share = sum(_prose_weight(block) for block in copied) / target_weight
+        share = min(1.0, sum(_prose_weight(piece) for piece in copied) / target_weight)
         by_design = _has_evidence(observation, UNTRANSLATED_EVIDENCE_PREFIX)
         status = "fail" if share >= COPIED_SHARE_FAIL and not by_design else "warn"
         _check(checks, "content.untranslated", status,
-               f"{len(copied)} prose block(s) ({share:.0%} of the target) are identical to the source text; "
-               f"first: {copied[0][:80]!r}", unit_id)
+               f"{len(copied)} source sentence(s) or table cell(s) ({share:.0%} of the target) appear verbatim "
+               f"in the target; first: {copied[0][:80]!r}", unit_id)
 
 
 def _heading_keys(markdown: str) -> set[str]:
@@ -540,25 +612,27 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             status, message = _variation_status("content.numbers", unit_id, source, target, observation)
             if status == "fail":
                 # Exhibit reconstructions can move numeric anchors (a table
-                # rebuilt beside its caption) into the adjacent unit.  When
-                # every unmatched anchor on one side is present in the
-                # neighbour on the other side, the numbers are conserved and
-                # the boundary artifact is only a warning.
+                # rebuilt beside its caption) into the adjacent unit.  A real
+                # move leaves the mirror-image imbalance next door: what this
+                # target lacks is surplus in a neighbour's target, and what it
+                # gained is missing from a neighbour's target.  Merely
+                # appearing somewhere nearby (a common year) explains nothing.
                 moved_source = source_numbers - target_numbers
                 moved_target = target_numbers - source_numbers
                 unit_index = unit_position.get(unit_id)
-                neighbor_tokens: Counter[str] = Counter()
+                neighbor_gained: Counter[str] = Counter()
+                neighbor_lost: Counter[str] = Counter()
                 for offset in (-1, 1):
                     neighbor_id = (
                         ordered_units[unit_index + offset]["unit_id"]
                         if unit_index is not None and 0 <= unit_index + offset < len(ordered_units)
                         else None
                     )
-                    neighbor_tokens.update(target_tokens_by_unit.get(neighbor_id, Counter()))
-                    neighbor_tokens.update(source_tokens_by_unit.get(neighbor_id, Counter()))
-                # Both directions must be explained by the neighbours; otherwise a
-                # changed value (1998 -> 1989) hides behind a common number.
-                if (moved_source or moved_target) and not (moved_source - neighbor_tokens) and not (moved_target - neighbor_tokens):
+                    neighbor_source = source_tokens_by_unit.get(neighbor_id, Counter())
+                    neighbor_target = target_tokens_by_unit.get(neighbor_id, Counter())
+                    neighbor_gained.update(neighbor_target - neighbor_source)
+                    neighbor_lost.update(neighbor_source - neighbor_target)
+                if (moved_source or moved_target) and not (moved_source - neighbor_gained) and not (moved_target - neighbor_lost):
                     status, message = "warn", "Numeric anchors moved to an adjacent unit during exhibit reconstruction"
             _check(checks, "content.numbers", status, message, unit_id)
         if _urls(_comparison_text(source)) != _urls(_comparison_text(target)):
@@ -621,6 +695,8 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     # caption inventory directly and require either a target asset or an
     # explicit structured-reconstruction observation.
     figure_audit = run_figure_audit(project, config)
+    for warning in figure_audit.get("warnings", []):
+        _check(checks, "assets.figure_inventory", "warn", warning)
     for item in figure_audit.get("figures", []):
         _check(
             checks,

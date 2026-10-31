@@ -26,16 +26,17 @@ The following are blocking in every mode:
 - Missing or duplicate required work units
 - Book Map nodes with no disposition
 - Missing chapters, appendices, notes, bibliography, index, figures, tables, formulas, or captions that are in scope
-- PDF source exhibits whose target caption has neither a meaningful visual asset nor an explicit reconstruction record in the figure audit
+- PDF source exhibits whose target caption has neither a meaningful visual asset nor an explicit reconstruction record in the figure audit. Captions are read from whole PDF lines (`Figure 3.2 Title`, `Fig. 4:`, `Chart 5`, `Figure 6-2`, `Plate II`); a line that continues in lower case (`Figure 7 shows ...`) is a citation, not a caption, and a list-of-figures entry with a dot leader is ignored; when a caption also appears on a text-only page, figures are cropped from the page that carries the visual. Figures and tables with the same number are separate exhibits; a target `图表`/`Exhibit` label may stand for either. Target labels are recognized in Chinese and English; for other target languages a missing caption is a warning. A PDF with images or vector drawings but no recognized caption is a warning, never a silent pass
 - Source/output hash mismatch or orphan output
 - Blank output or unparsed source region
 - Broken local resource or note/reference link
 - Unapproved skipped content
-- A unit whose prose block count drops below the source (`content.block_coverage`) unless the observation records `structure_reflowed: <reason>` or a figure reconstruction
-- A unit whose content length is under half of the source (`content.length_ratio`; Latin words and CJK characters are weighted 1 to 0.6)
-- A unit where at least half the prose is copied verbatim from the source (`content.untranslated`) unless the observation records `untranslated_by_design: <reason>`
+- A unit whose prose block count drops below the source (`content.block_coverage`) unless the observation records `structure_reflowed: <reason>` (with a non-empty reason) or a figure reconstruction. Block counts cannot see a paragraph omitted while another was split; length-based alignment was evaluated and rejected because it cannot separate that case from ordinary length variation without many false alarms
+- A unit whose content length is under half of the source (`content.length_ratio`; Latin words and CJK characters are weighted 1 to 0.6, and pipe-table cells count)
+- A unit whose target has fewer pipe-table rows than the source (`structure.tables`) unless a reflow or reconstruction is recorded
+- A unit where at least half the target is copied verbatim from the source (`content.untranslated`) unless the observation records `untranslated_by_design: <reason>`. Copies are found per sentence and per table cell of six or more words, so a single sentence left in the source language is a warning
 - A unit whose recorded dependencies (source, translation-relevant configuration, Book Map node, Style Guide, incoming capsule, glossary selection, page evidence) no longer match, or whose status is not `completed` (`unit.stale`, `unit.status`)
-- A changed number or year; numeric differences are downgraded only when content was demonstrably reflowed, or when the unmatched values on both sides appear in a neighbouring unit
+- A changed number or year; numeric differences are downgraded only when the observation records a reflow or reconstruction (other `source_issues` notes do not count), when the values moved across a unit boundary (the neighbour shows the mirror-image imbalance, not merely the same number), or when a small count is spelled out on the other side (`five` / `五` for `5`)
 
 Deterministic checks should also compare heading counts, image/table/formula references, numbers and units, footnote/endnote anchors and placement, untranslated residue, and glossary variants. Footnote markers must remain superscript references attached to the intended term; they must not become quantity words such as “11个 5S”. Differences may be warnings only when a reviewed explanation exists.
 

@@ -348,6 +348,102 @@ class PublicationCleanupTests(unittest.TestCase):
             self.assertIn("native Word TOC field is missing", result["errors"])
 
 
+def _laid_out_docx(directory: str, headings: list[str], toc: bool = False):
+    from docx import Document
+
+    from book_translation_pro.publication import _publication_options, postprocess_docx
+
+    path = Path(directory) / "book.docx"
+    document = Document()
+    if toc:
+        document.add_heading("目录", 1)
+        document.add_paragraph("[[TOC]]")
+    for heading in headings:
+        document.add_heading(heading, 1)
+        document.add_paragraph("正文。" * 40)
+    document.save(path)
+    postprocess_docx(path, _publication_options({"project_id": "layout", "mode": "publication"}))
+    return path, Document(path)
+
+
+class DocxLayoutTests(unittest.TestCase):
+    def test_chapter_conventions_open_body_sections(self) -> None:
+        for chapters in (
+            ["第一章 机器", "第二章 工厂"], ["第 1 章 机器", "第 2 章 工厂"],
+            ["Chapter One The Machine", "Chapter 2 The Mill"], ["Part I Origins", "Part II Growth"],
+            ["The Machine Age", "The Mill Town"],
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                _path, document = _laid_out_docx(directory, ["前言", *chapters])
+                self.assertEqual(len(document.sections), 3, chapters)
+
+    def test_bilingual_title_pair_shares_one_opener(self) -> None:
+        from docx import Document
+
+        from book_translation_pro.publication import _publication_options, postprocess_docx
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bilingual.docx"
+            document = Document()
+            document.add_heading("前言", 1)
+            document.add_paragraph("前言正文。")
+            for pair in (("Part One Origins", "第一部分 起源"), ("Chapter 1 The Machine", "第一章 机器"),
+                         ("Chapter 2 The Mill", "第二章 工厂")):
+                for heading in pair:
+                    document.add_heading(heading, 1)
+                document.add_paragraph("Body. 正文。")
+            document.save(path)
+            postprocess_docx(path, _publication_options({"project_id": "layout", "mode": "publication"}))
+            # Front matter, the part pair, and one section per chapter pair.
+            self.assertEqual(len(Document(path).sections), 4)
+
+    def test_front_matter_is_roman_on_both_sides_and_body_restarts_in_arabic(self) -> None:
+        from docx.oxml.ns import qn
+
+        with tempfile.TemporaryDirectory() as directory:
+            _path, document = _laid_out_docx(directory, ["前言", "第一章 机器"])
+            front, body = document.sections
+            self.assertEqual(front._sectPr.find(qn("w:pgNumType")).get(qn("w:fmt")), "lowerRoman")
+            self.assertEqual(body._sectPr.find(qn("w:pgNumType")).get(qn("w:fmt")), "decimal")
+            for footer in (front.footer, front.even_page_footer):
+                self.assertIn("PAGE", footer._element.xml)
+
+    def test_single_section_book_is_numbered_in_arabic(self) -> None:
+        from docx.oxml.ns import qn
+
+        with tempfile.TemporaryDirectory() as directory:
+            _path, document = _laid_out_docx(directory, ["前言"])
+            self.assertEqual(len(document.sections), 1)
+            self.assertEqual(document.sections[0]._sectPr.find(qn("w:pgNumType")).get(qn("w:fmt")), "decimal")
+
+    def test_page_number_type_keeps_the_section_property_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _path, document = _laid_out_docx(directory, ["前言", "第一章 机器"])
+            for section in document.sections:
+                order = [child.tag.split("}")[1] for child in section._sectPr]
+                self.assertLess(order.index("pgNumType"), order.index("cols"), order)
+                self.assertEqual(order[-1], "docGrid", order)
+
+    def test_unrefreshed_toc_is_flagged_in_docx_and_blocks_pdf(self) -> None:
+        import fitz
+
+        from book_translation_pro.publication import TOC_FIELD_PLACEHOLDER, validate_pdf_package
+
+        with tempfile.TemporaryDirectory() as directory:
+            path, _document = _laid_out_docx(directory, ["第一章 机器"], toc=True)
+            result = validate_docx_package(path, require_toc=True)
+            self.assertTrue(result["passed"])
+            self.assertTrue(any("TOC field was not refreshed" in warning for warning in result["warnings"]))
+            pdf = Path(directory) / "book.pdf"
+            document = fitz.open()
+            document.new_page().insert_text((72, 72), "Contents " + TOC_FIELD_PLACEHOLDER, fontname="china-s")
+            document.save(pdf)
+            document.close()
+            result = validate_pdf_package(pdf)
+            self.assertFalse(result["passed"])
+            self.assertIn("unbuilt table of contents on page 1", result["errors"][0])
+
+
 class ChmImagePromotionTests(unittest.TestCase):
     def test_promotes_linked_full_resolution_image(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
