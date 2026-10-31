@@ -118,6 +118,22 @@ class StructureTests(unittest.TestCase):
         segments = parse_blocks("# H\n\n```python\na = 1\n\nb = 2\n```\n\nAfter")
         self.assertEqual([item.kind for item in segments], ["heading", "code", "paragraph"])
 
+    def test_long_html_table_is_never_split(self) -> None:
+        rows = "".join(f"<tr><td><p>Row {index} label</p></td><td><p>{index * 7}</p></td></tr>\n" for index in range(400))
+        segments = parse_blocks(f"# T\n\n<table>\n<tbody>\n{rows}</tbody>\n</table>\n\nAfter")
+        self.assertEqual([item.kind for item in segments], ["heading", "table", "paragraph"])
+        expanded = expand_long_segments(segments, 6000)
+        self.assertEqual(len(expanded), 3)
+        self.assertTrue(expanded[1].text.endswith("</table>"))
+
+    def test_long_paragraph_splits_at_sentence_ends(self) -> None:
+        sentence = "The operators inspected every station before the shift began, and it mattered. "
+        segments = expand_long_segments(parse_blocks(sentence * 200), 2000)
+        self.assertGreater(len(segments), 1)
+        for piece in segments[:-1]:
+            self.assertTrue(piece.text.endswith("it mattered."), piece.text[-40:])
+        self.assertEqual(" ".join(piece.text for piece in segments).strip(), (sentence * 200).strip())
+
 
 class GlossaryTests(unittest.TestCase):
     def entry(self) -> dict:

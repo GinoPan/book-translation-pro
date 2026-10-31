@@ -25,7 +25,7 @@ The capsule is context, not authority. Do not add facts absent from the source, 
 Use `show-unit --phase translate`. Read the source unit, Style Guide, approved Glossary entries, incoming Capsule, `chapter_context` (summaries of earlier units in the same chapter), and user instructions. Translate from this package and record the draft before its inputs change; a draft recorded after its inputs changed is rejected.
 
 - Translate every source element in order.
-- Preserve heading levels, lists, tables, code blocks, raw markup, links, image paths, note anchors, citations, formulas, numbers, units, model identifiers, and URLs.
+- Preserve heading levels, lists, tables, code blocks, raw markup, links, image paths, note anchors (including Markdown footnote references `[^fn3]` and their definition lines `[^fn3]: ...`; translate the note text, keep the label), citations, formulas, numbers, units, model identifiers, and URLs.
 - Translate visible prose, headings, captions, safe alt text, and table language.
 - Follow approved Glossary targets within their scopes. Report conflicts instead of silently changing an approved term.
 - Use natural target-language syntax while preserving meaning, uncertainty, negation, qualifications, warnings, and authorial tone.

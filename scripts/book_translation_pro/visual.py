@@ -123,6 +123,22 @@ def _reading_order(blocks: list[dict[str, Any]], layout: str, page_width: float)
     return sorted(header, key=key) + sorted(left, key=key) + sorted(right, key=key) + sorted(footer, key=key)
 
 
+def _furniture_role(block: dict[str, Any], boxes: dict[tuple[float, ...], str]) -> str | None:
+    """Return header/footer/page_number when every line of the block is page furniture."""
+    if block.get("type") != 0:
+        return None
+    kinds = [
+        boxes.get(tuple(round(float(value), 1) for value in line["bbox"]))
+        for line in block.get("lines", [])
+        if "".join(span.get("text", "") for span in line.get("spans", [])).strip()
+    ]
+    if not kinds or not all(kinds):
+        return None
+    if all(kind == "page_number" for kind in kinds):
+        return "page_number"
+    return "header" if "header" in kinds else "footer"
+
+
 def _role_and_risk(block: dict[str, Any], page_rect: Any, median_size: float, layout: str) -> tuple[str, int, list[str], str]:
     if block.get("type") == 1:
         return "figure", 1, ["embedded_image"], "preserve_asset"
@@ -441,6 +457,9 @@ def prepare_visual(
         for unit in units
     }
     page_units, unit_pages = align_pages_to_units(page_texts, unit_texts)
+    from .pdf_text import page_furniture  # pdf_text builds on this module
+
+    furniture = page_furniture(source)
     unit_segments = {unit["id"]: unit["segment_ids"] for unit in units}
     asset_records: list[dict[str, Any]] = []
     minimum_text = int(config["visual"].get("minimum_text_characters", 20))
@@ -464,7 +483,12 @@ def prepare_visual(
         segment_ids = sorted({segment for unit_id in selected_units for segment in unit_segments.get(unit_id, [])})
         regions: list[dict[str, Any]] = []
         for order, block in enumerate(ordered):
-            role, risk, reasons, disposition = _role_and_risk(block, page_rect, median_size, layout)
+            furniture_role = _furniture_role(block, furniture[page_number - 1])
+            if furniture_role:
+                # Removed from the working draft by pdf_text.clean_pdf.
+                role, risk, reasons, disposition = furniture_role, 0, ["page_furniture_removed"], "omit_approved"
+            else:
+                role, risk, reasons, disposition = _role_and_risk(block, page_rect, median_size, layout)
             if scanned and block.get("type") == 1:
                 risk, reasons, disposition = 3, ["scanned_page_image"], "preserve_asset"
             region = {

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from book_translation_pro.artifacts import atomic_write_json, atomic_write_text, safe_project_path
+from book_translation_pro.artifacts import atomic_write_json, atomic_write_text, load_json, safe_project_path
 from book_translation_pro.build import build_outputs
 from book_translation_pro.config import load_resolved_project
 from book_translation_pro.manifest import load_manifest
@@ -241,3 +241,43 @@ class RealFormatIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(RUN_E2E, "set BTP_RUN_E2E=1 to run real Calibre/Pandoc integration")
+class RealPdfLayoutTests(unittest.TestCase):
+    def test_calibre_draft_matches_the_layout_contract(self) -> None:
+        from tests.unit.test_pdf_layout import prepare_layout_book
+
+        with tempfile.TemporaryDirectory() as temp:
+            project, markdown = prepare_layout_book(Path(temp), calibre=True)
+            conversion = load_json(project / "analysis" / "book-profile.json")["conversion"]
+            self.assertEqual(conversion["extractor"], "calibre")
+            self.assertNotIn("A HISTORY OF WORK", markdown)
+            self.assertEqual(markdown.count("Engines of Change"), 1)
+            self.assertIn("The ledger recorded the result.[^fn1]\n\n[^fn1]: Source: factory ledger, 1998, p. 42.\n", markdown)
+            self.assertIn("could stop for hours when a belt slipped", markdown)
+            self.assertNotIn("gearbox", markdown)
+            self.assertRegex(markdown, r'<img src="assets.original/images/\d+\.png"')
+            self.assertIn("| Year | Units | Defects |\n|---|---|---|\n| 1998 | 1,200 | 14 |", markdown)
+            headings = [line for line in markdown.splitlines() if line.startswith("#")]
+            self.assertEqual(headings, ["# Chapter 1 Engines of Change", "## Daily Lessons", "# Chapter 2 The Night Shift"])
+
+    def test_short_pdf_with_alternating_heads_converts_with_calibre(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = fitz.open()
+            for number in range(1, 5):
+                page = document.new_page(width=420, height=600)
+                page.insert_text((40, 30), "THE MACHINE AGE" if number % 2 else "Chapter 1 · Engines", fontsize=8)
+                page.insert_text((370, 30), str(number + 10), fontsize=8)
+                page.insert_textbox(fitz.Rect(40, 70, 380, 520), f"Page {number} body text sits here. " * 8, fontsize=10)
+            document.save(root / "short.pdf")
+            document.close()
+            initialize_project(root / "short.pdf", root / "project", "zh-CN", "en", "fast", ["markdown"])
+            result = prepare_project(root / "project")
+            self.assertFalse(any("PyMuPDF fallback" in warning for warning in result["warnings"]), result["warnings"])
+            markdown = (root / "project" / "source-work" / "extracted" / "input.md").read_text(encoding="utf-8")
+            self.assertNotIn("THE MACHINE AGE", markdown)
+            self.assertEqual(markdown.count("body text sits here"), 32)

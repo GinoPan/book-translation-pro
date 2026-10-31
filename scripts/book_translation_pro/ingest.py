@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from .artifacts import BTPError, atomic_write_text, portable_path, safe_project_path
-from .pdf_text import extract_markdown, heading_lines, promote_headings
+from .artifacts import BTPError, atomic_write_json, atomic_write_text, external_tool_path, portable_path, safe_project_path
+from .pdf_text import clean_pdf, extract_markdown, heading_lines, promote_headings, restore_layout_markup
 from .runtime import find_binary
 
 
@@ -280,10 +280,55 @@ def strip_wrapper_divs(markdown: str) -> tuple[str, int]:
     return "\n".join(lines), removed
 
 
-def _convert_pdf_with_pymupdf(project: Path, source: Path, reason: str) -> tuple[Path, dict[str, Any]]:
+_TABLE_TAG_RE = re.compile(r"<(/?)(table|thead|tbody|tfoot|tr|td|th)\b([^>]*)>", re.IGNORECASE)
+_TABLE_COLUMNS_RE = re.compile(r"<colgroup\b[^>]*>.*?</colgroup>\s*|<col\b[^>]*>\s*", re.IGNORECASE | re.DOTALL)
+# Spans shape the table and ids are internal link targets; everything else is styling.
+_KEPT_TABLE_ATTR_RE = re.compile(r"""\b(?:colspan|rowspan)\s*=\s*(["']?)\d+\1|\bid\s*=\s*(["'])[^"']*\2""", re.IGNORECASE)
+
+
+def simplify_html_tables(markdown: str) -> tuple[str, int]:
+    """Drop presentational markup from raw HTML tables in the working draft.
+
+    Pandoc keeps tables it cannot express as pipes (merged or multi-paragraph
+    cells) as HTML that carries Calibre classes and column widths.  The
+    translator only needs the structure; ``colspan``/``rowspan`` and ``id`` are
+    kept.
+    """
+
+    def tag(match: re.Match[str]) -> str:
+        kept = "".join(f" {attr.group(0)}" for attr in _KEPT_TABLE_ATTR_RE.finditer(match.group(3)))
+        return f"<{match.group(1)}{match.group(2).lower()}{kept}>"
+
+    pieces: list[str] = []
+    chunk: list[str] = []
+    tables = 0
+
+    def flush() -> None:
+        nonlocal tables
+        if chunk:
+            text = "\n".join(chunk)
+            tables += len(re.findall(r"<table\b", text, re.IGNORECASE))
+            pieces.append(_TABLE_TAG_RE.sub(tag, _TABLE_COLUMNS_RE.sub("", text)))
+            chunk.clear()
+
+    in_fence = False
+    for line in markdown.split("\n"):
+        fence = line.lstrip().startswith(("```", "~~~"))
+        if in_fence or fence:
+            flush()
+            pieces.append(line)  # code samples stay verbatim
+            if fence:
+                in_fence = not in_fence
+            continue
+        chunk.append(line)
+    flush()
+    return "\n".join(pieces), tables
+
+
+def _convert_pdf_with_pymupdf(project: Path, source: Path, reason: str, cleaned: Path) -> tuple[Path, dict[str, Any]]:
     markdown = safe_project_path(project, "source-work/extracted/input.md")
     image_dir = safe_project_path(project, "assets/original/pdf")
-    text, stats = extract_markdown(source, project, image_dir)
+    text, stats = extract_markdown(cleaned, project, image_dir)
     if not text.strip():
         raise BTPError(f"PyMuPDF fallback extracted no text ({reason})")
     atomic_write_text(markdown, text)
@@ -300,28 +345,48 @@ def _convert_pdf_with_pymupdf(project: Path, source: Path, reason: str) -> tuple
 def convert_to_markdown(project: Path, config: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
     """Convert the source to the Markdown working draft.
 
-    PDFs use Calibre/Pandoc and then recover headings from the PDF font sizes;
-    when those tools are missing or Calibre cannot reflow the file, the PDF is
-    extracted directly with PyMuPDF and the reason is recorded.
+    PDFs are first cleaned (``pdf_text.clean_pdf``: page furniture removed,
+    vector figures rendered, tables and footnotes tokenized).  The cleaned copy
+    goes through Calibre/Pandoc, after which headings are recovered from the PDF
+    font sizes; when those tools are missing or Calibre cannot reflow the file,
+    it is extracted directly with PyMuPDF and the reason is recorded.  Either
+    way the tokens are then restored as Markdown tables and footnotes.
     """
     source = safe_project_path(project, config["source"]["path"])
     fmt = source_format(source, config["source"].get("format", "auto"))
     if fmt != "pdf" or not source.is_file():
         return _convert_with_tools(project, config)
+    cleaned = safe_project_path(project, "source-work/extracted/layout-clean.pdf")
+    layout = clean_pdf(source, cleaned)
+    atomic_write_json(safe_project_path(project, "source-work/extracted/pdf-layout.json"), layout)
     missing = [name for name in ("ebook-convert", "pandoc") if not find_binary(name)]
     if missing:
-        return _convert_pdf_with_pymupdf(project, source, f"missing conversion tools: {', '.join(missing)}")
-    try:
-        markdown, conversion = _convert_with_tools(project, config)
-    except BTPError as exc:
-        return _convert_pdf_with_pymupdf(project, source, f"Calibre/Pandoc conversion failed: {exc}")
-    text, promoted = promote_headings(markdown.read_text(encoding="utf-8"), heading_lines(source))
+        markdown, conversion = _convert_pdf_with_pymupdf(project, source, f"missing conversion tools: {', '.join(missing)}", cleaned)
+    else:
+        try:
+            markdown, conversion = _convert_with_tools(project, config, pdf_input=cleaned)
+        except BTPError as exc:
+            markdown, conversion = _convert_pdf_with_pymupdf(project, source, f"Calibre/Pandoc conversion failed: {exc}", cleaned)
+    text, restored = restore_layout_markup(markdown.read_text(encoding="utf-8"), layout)
+    if conversion["extractor"] != "pymupdf":
+        text, conversion["pdf_headings_promoted"] = promote_headings(text, heading_lines(cleaned))
     atomic_write_text(markdown, text)
-    conversion["pdf_headings_promoted"] = promoted
+    missing_tokens = restored.pop("missing_tokens")
+    conversion["pdf_layout"] = {**layout["stats"], **restored}
+    conversion["layout_warnings"] = list(layout["warnings"])
+    if missing_tokens:
+        conversion["layout_warnings"].append(
+            "Converted text lost layout placeholders; these were appended at the end of the working draft: "
+            + ", ".join(missing_tokens)
+        )
+    if layout["stats"]["footnotes_unlinked"]:
+        conversion["layout_warnings"].append(
+            f"{layout['stats']['footnotes_unlinked']} footnote(s) had no matching reference marker and stay in the text flow"
+        )
     return markdown, conversion
 
 
-def _convert_with_tools(project: Path, config: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+def _convert_with_tools(project: Path, config: dict[str, Any], pdf_input: Path | None = None) -> tuple[Path, dict[str, Any]]:
     source = safe_project_path(project, config["source"]["path"])
     if not source.is_file():
         raise BTPError(f"Configured source file is missing: {config['source']['path']}")
@@ -367,7 +432,11 @@ def _convert_with_tools(project: Path, config: dict[str, Any]) -> tuple[Path, di
             except ValueError as exc:
                 raise BTPError(f"Unsafe path produced while extracting CHM: {member}") from exc
     else:
-        _run([str(calibre), str(source), str(htmlz)], project, logs / "calibre-to-htmlz.log")
+        # Calibre 9.14's automatic header/footer scan crashes on short PDFs
+        # (it indexes pages by 1-based number) and misses alternating running
+        # heads; clean_pdf has already removed page furniture, so turn it off.
+        pdf_options = ["--pdf-header-skip", "0", "--pdf-footer-skip", "0"] if fmt == "pdf" else []
+        _run([str(calibre), str(pdf_input or source), str(htmlz), *pdf_options], project, logs / "calibre-to-htmlz.log")
         _safe_extract(htmlz, html_root)
     if fmt == "chm":
         primary, toc_path, topic_count = _combine_chm_topics(html_root, html_root / "btp-chm-combined.html")
@@ -385,8 +454,10 @@ def _convert_with_tools(project: Path, config: dict[str, Any]) -> tuple[Path, di
             "--from=html",
             "--to=gfm+raw_html",
             "--wrap=none",
-            f"--extract-media={media_dir}",
-            f"--resource-path={html_root}",
+            # Pandoc joins resource paths with "/", which a \\?\ path rejects:
+            # images in deep project folders were replaced by placeholders.
+            f"--extract-media={external_tool_path(media_dir)}",
+            f"--resource-path={external_tool_path(html_root)}",
             "--output",
             str(markdown),
         ],
@@ -401,6 +472,7 @@ def _convert_with_tools(project: Path, config: dict[str, Any]) -> tuple[Path, di
     for root in sorted(roots, key=len, reverse=True):
         converted = converted.replace(root + "\\", "").replace(root + "/", "")
     converted, wrapper_lines_removed = strip_wrapper_divs(converted)
+    converted, html_tables = simplify_html_tables(converted)
     atomic_write_text(markdown, converted)
     if not markdown.is_file() or not markdown.read_text(encoding="utf-8").strip():
         raise BTPError("Source conversion produced an empty Markdown working draft")
@@ -416,4 +488,5 @@ def _convert_with_tools(project: Path, config: dict[str, Any]) -> tuple[Path, di
         "toc": portable_path(toc_path, project) if toc_path else None,
         "image_link_promotions": promoted_images,
         "wrapper_div_lines_removed": wrapper_lines_removed,
+        "html_tables_simplified": html_tables,
     }

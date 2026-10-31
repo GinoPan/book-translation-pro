@@ -384,6 +384,7 @@ def prepare_project(
             f"PDF text was extracted with the PyMuPDF fallback ({conversion['fallback_reason']}); "
             "check headings, tables, and reading order on the rendered pages."
         )
+    profile["warnings"].extend(conversion.get("layout_warnings", []))
     profile["ocr_preflight"] = ocr_preflight
     atomic_write_json(project / "analysis" / "book-profile.json", profile)
 

@@ -69,7 +69,7 @@ btp doctor --mode study
 |---|---|
 | DOCX / EPUB 输入 | **Calibre**（`ebook-convert`）和 **Pandoc**，必需 |
 | CHM 输入 | Pandoc，以及 7-Zip 或 Windows `hh.exe` |
-| PDF 输入 | 优先用 Calibre + Pandoc，再按 PDF 字号恢复标题；工具缺失或 Calibre 转换失败时自动改用 PyMuPDF 直接提取，并在 `analysis/book-profile.json` 中记录警告 |
+| PDF 输入 | 先生成版面清理后的副本：去掉页眉页码，把矢量图连同图内文字渲染成图片，把带框线的表格和有正文标号的脚注换成占位符。之后优先用 Calibre + Pandoc 转换，再按 PDF 字号恢复标题（含同字号加粗小标题）；工具缺失或 Calibre 转换失败时自动改用 PyMuPDF 提取，并在 `analysis/book-profile.json` 中记录警告。最后占位符还原为 Markdown 表格和 `[^fnN]` 脚注，跨页断开的段落重新接上 |
 | 扫描页 OCR | Tesseract |
 | PDF 导出 | Microsoft Word 或 LibreOffice |
 | Publication 模式的 EPUB | EPUBCheck |

@@ -2616,7 +2616,7 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
         bilingual_metadata_args.append(f"--metadata=author:{author}")
     common = [
         str(pandoc), str(markdown_path), "--standalone",
-        *metadata_args, f"--resource-path={project}",
+        *metadata_args, f"--resource-path={external_tool_path(project)}",
     ]
     requested = set(config["outputs"])
     cover_ref = str(config.get("metadata", {}).get("cover", "")).strip()
@@ -2630,7 +2630,7 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
         str(pandoc), str(epub_markdown), "--from=markdown+footnotes+raw_html",
         "--to=html5", "--standalone", "--section-divs",
         *metadata_args,
-        f"--resource-path={project}", "--output", str(xhtml_path),
+        f"--resource-path={external_tool_path(project)}", "--output", str(xhtml_path),
     ], project)
     xhtml_validation = validate_xhtml_document(xhtml_path)
     if not xhtml_validation["passed"]:
@@ -2661,7 +2661,7 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
         epub_command = [
             str(pandoc), str(xhtml_path), "--from=html", "--standalone",
             *metadata_args,
-            f"--resource-path={project}{os.pathsep}{xhtml_path.parent}",
+            f"--resource-path={external_tool_path(project)}{os.pathsep}{external_tool_path(xhtml_path.parent)}",
             "--toc", "--css", str(css_path),
         ]
         if cover_ref:
@@ -2694,7 +2694,7 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
             str(pandoc), str(bilingual_markdown), "--from=markdown+fenced_divs+footnotes+raw_html",
             "--to=html5", "--standalone", "--section-divs",
             *bilingual_metadata_args,
-            f"--resource-path={project}", "--output", str(bilingual_xhtml),
+            f"--resource-path={external_tool_path(project)}", "--output", str(bilingual_xhtml),
         ], project)
         xhtml_result = validate_xhtml_document(bilingual_xhtml)
         if not xhtml_result["passed"]:
@@ -2706,7 +2706,7 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
             _run([
                 str(pandoc), str(bilingual_markdown), "--from=markdown+fenced_divs+footnotes+raw_html",
                 "--standalone", *bilingual_metadata_args,
-                f"--resource-path={project}", "--output", str(bilingual_docx),
+                f"--resource-path={external_tool_path(project)}", "--output", str(bilingual_docx),
             ], project)
             postprocess_docx(bilingual_docx, options)
             _word_refresh_and_export(bilingual_docx, None)
@@ -2726,7 +2726,7 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
             bilingual_epub = output_dir / "book-bilingual.epub"
             command = [
                 str(pandoc), str(bilingual_xhtml), "--from=html", "--standalone", "--toc",
-                *bilingual_metadata_args, f"--resource-path={project}{os.pathsep}{bilingual_xhtml.parent}",
+                *bilingual_metadata_args, f"--resource-path={external_tool_path(project)}{os.pathsep}{external_tool_path(bilingual_xhtml.parent)}",
                 "--css", str(bilingual_css),
             ]
             if cover_ref:
