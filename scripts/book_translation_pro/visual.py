@@ -34,6 +34,24 @@ OCR_LANGUAGE_MAP = {
     "en": "eng", "de": "deu", "fr": "fra", "es": "spa", "it": "ita", "pt": "por",
     "ja": "jpn", "ko": "kor", "zh": "chi_sim", "zh-hans": "chi_sim", "zh-hant": "chi_tra",
 }
+# With source.language "auto", each scanned page's script is detected with
+# Tesseract OSD and read with a language for that script; no script is
+# silently forced through English.
+AUTO_OCR_LANGUAGE = "auto"
+OSD_SCRIPT_LANGUAGES = {
+    "Latin": ("eng",), "Cyrillic": ("rus",), "Greek": ("ell",), "Arabic": ("ara",),
+    "Hebrew": ("heb",), "Devanagari": ("hin",), "Thai": ("tha",),
+}
+# OSD confuses the CJK scripts with one another (a Chinese page can read as
+# "Korean"), so any CJK verdict reads with every installed CJK language.
+OSD_CJK_SCRIPTS = {"Han", "HanS", "HanT", "Japanese", "Korean", "Hangul"}
+CJK_OCR_LANGUAGES = ("chi_sim", "chi_tra", "jpn", "kor")
+# Issues that mean no OCR language fits a page, as opposed to a weak read.
+OCR_LANGUAGE_ISSUES = ("ocr_script_", "ocr_language_unavailable")
+# Tesseract reads best near 300 DPI; the page-map render may be coarser.
+OCR_MIN_DPI = 300
+# Mean word confidence below this marks OCR text as unreliable.
+OCR_MIN_CONFIDENCE = 60.0
 
 
 def now_utc() -> str:
@@ -209,11 +227,68 @@ def _tesseract_languages(executable: Path | None) -> set[str]:
 
 
 def _ocr_language(source_language: str, available: set[str]) -> str | None:
+    if source_language == AUTO_OCR_LANGUAGE:
+        return AUTO_OCR_LANGUAGE if "osd" in available else None
     normalized = source_language.casefold()
     wanted = OCR_LANGUAGE_MAP.get(normalized, OCR_LANGUAGE_MAP.get(normalized.split("-")[0], normalized))
-    if source_language == "auto":
-        wanted = "eng"
     return wanted if wanted in available else None
+
+
+def _detect_ocr_language(image_path: Path, executable: Path, available: set[str]) -> tuple[str | None, str | None]:
+    """Pick an installed OCR language for the page's script; return ``(language, issue)``."""
+    result = subprocess.run(
+        [str(executable), str(image_path), "stdout", "--psm", "0"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+    )
+    match = re.search(r"^Script:\s*(\S+)", result.stdout, re.MULTILINE)
+    if not match:
+        return None, "ocr_script_undetected"
+    script = match.group(1)
+    if script in OSD_CJK_SCRIPTS:
+        usable = [item for item in CJK_OCR_LANGUAGES if item in available]
+        return ("+".join(usable), None) if usable else (None, f"ocr_language_unavailable:{script}:{'/'.join(CJK_OCR_LANGUAGES)}")
+    candidates = OSD_SCRIPT_LANGUAGES.get(script)
+    if not candidates:
+        return None, f"ocr_script_unsupported:{script}"
+    language = next((item for item in candidates if item in available), None)
+    return (language, None) if language else (None, f"ocr_language_unavailable:{candidates[0]}")
+
+
+def _body_text_length(blocks: list[dict[str, Any]], page_rect: Any) -> int:
+    """Characters of text outside the top and bottom margin bands.
+
+    A scanned page can carry a text layer for its running head or folio
+    only; that must not hide the page from OCR.
+    """
+    from .pdf_text import MARGIN_FRACTION
+
+    band = page_rect.height * MARGIN_FRACTION
+    return sum(
+        len(_block_text(block)) for block in blocks
+        if block.get("type") == 0
+        and not (block["bbox"][3] <= page_rect.y0 + band or block["bbox"][1] >= page_rect.y1 - band)
+    )
+
+
+def _ocr_page(
+    source: Path, page_number: int, executable: Path, language: str, available: set[str], dpi: int, work_dir: Path
+) -> tuple[str, float | None, list[str]]:
+    """Render one page at OCR resolution and read it; return text, mean confidence, and issues."""
+    fitz = _fitz()
+    image_path = work_dir / f"page-{page_number:04d}-ocr.png"
+    scale = max(dpi, OCR_MIN_DPI) / 72
+    with fitz.open(source) as document:
+        document[page_number - 1].get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False).save(image_path)
+    try:
+        if language == AUTO_OCR_LANGUAGE:
+            language, issue = _detect_ocr_language(image_path, executable, available)
+            if issue:
+                return "", None, [issue]
+        text, confidence = _run_ocr(image_path, executable, language)
+    finally:
+        image_path.unlink(missing_ok=True)
+    low = confidence is not None and confidence < OCR_MIN_CONFIDENCE
+    return text, confidence, [f"ocr_low_confidence:{confidence:.0f}"] if low else []
 
 
 def _configured_ocr_language(config: dict[str, Any], available: set[str]) -> str | None:
@@ -264,9 +339,7 @@ def augment_markdown_with_scanned_page_ocr(
     language = _configured_ocr_language(config, available)
     minimum_text = int(config["visual"].get("minimum_text_characters", 20))
     dpi = int(config["visual"]["render_dpi"])
-    page_dir = project / "assets" / "page-images"
     ocr_dir = project / "source-work" / "ocr"
-    page_dir.mkdir(parents=True, exist_ok=True)
     ocr_dir.mkdir(parents=True, exist_ok=True)
     recovered: list[tuple[int, str]] = []
     scanned_pages: list[int] = []
@@ -280,7 +353,7 @@ def augment_markdown_with_scanned_page_ocr(
                 max(0.0, (block["bbox"][2] - block["bbox"][0]) * (block["bbox"][3] - block["bbox"][1]))
                 for block in image_blocks
             ) / max(1.0, page.rect.width * page.rect.height))
-            if len(text) >= minimum_text or coverage < 0.5:
+            if _body_text_length(blocks, page.rect) >= minimum_text or coverage < 0.5:
                 continue
             scanned_pages.append(page_index)
             if config["visual"].get("ocr_mode", "auto") == "off":
@@ -292,13 +365,14 @@ def augment_markdown_with_scanned_page_ocr(
             if not language:
                 issues.append(f"page-{page_index:04d}:ocr_language_unavailable")
                 continue
-            image_path = page_dir / f"page-{page_index:04d}.png"
-            page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False).save(image_path)
             try:
-                ocr_text, _ = _run_ocr(image_path, executable, language)
+                ocr_text, _confidence, page_issues = _ocr_page(source, page_index, executable, language, available, dpi, ocr_dir)
             except (BTPError, subprocess.SubprocessError) as exc:
                 issues.append(f"page-{page_index:04d}:ocr_failed:{exc}")
                 continue
+            issues.extend(f"page-{page_index:04d}:{issue}" for issue in page_issues)
+            if any(issue.startswith(OCR_LANGUAGE_ISSUES) for issue in page_issues):
+                continue  # no usable language for this page; reported above
             if len(ocr_text.strip()) < minimum_text:
                 issues.append(f"page-{page_index:04d}:ocr_output_too_short")
                 continue
@@ -444,7 +518,8 @@ def prepare_visual(
             image_blocks = [block for block in blocks if block.get("type") == 1]
             text = "\n".join(_block_text(block) for block in text_blocks)
             cached_ocr = ocr_dir / f"page-{page_number:04d}.txt"
-            alignment_text = cached_ocr.read_text(encoding="utf-8") if not text.strip() and cached_ocr.is_file() else text
+            scanned_text = _body_text_length(text_blocks, page.rect) < int(config["visual"].get("minimum_text_characters", 20))
+            alignment_text = cached_ocr.read_text(encoding="utf-8") if scanned_text and cached_ocr.is_file() else text
             page_texts.append(alignment_text)
             try:
                 table_boxes = [table.bbox for table in page.find_tables().tables] if hasattr(page, "find_tables") else []
@@ -478,7 +553,7 @@ def prepare_visual(
             max(0.0, (block["bbox"][2] - block["bbox"][0]) * (block["bbox"][3] - block["bbox"][1]))
             for block in image_blocks
         ) / max(1.0, page_rect.width * page_rect.height))
-        scanned = len(text.strip()) < minimum_text and image_coverage >= 0.5
+        scanned = _body_text_length(blocks, page_rect) < minimum_text and image_coverage >= 0.5
         if scanned:
             layout = "fixed_layout"
         sizes = [value for block in text_blocks for value in _font_sizes(block)]
@@ -535,9 +610,13 @@ def prepare_visual(
                 ocr_status, ocr_issues = "unavailable", ["ocr_language_unavailable"]
             else:
                 try:
-                    ocr_text, ocr_confidence = _run_ocr(image_path, tesseract, ocr_language)
-                    if len(ocr_text.strip()) < minimum_text:
-                        ocr_status, ocr_issues = "failed", ["ocr_output_too_short"]
+                    ocr_text, ocr_confidence, ocr_issues = _ocr_page(
+                        source, page_number, tesseract, ocr_language, languages, dpi, ocr_dir
+                    )
+                    if any(issue.startswith(OCR_LANGUAGE_ISSUES) for issue in ocr_issues):
+                        ocr_status = "unavailable"
+                    elif len(ocr_text.strip()) < minimum_text:
+                        ocr_status, ocr_issues = "failed", [*ocr_issues, "ocr_output_too_short"]
                     else:
                         ocr_path = ocr_dir / f"page-{page_number:04d}.txt"
                         atomic_write_text(ocr_path, ocr_text.strip() + "\n")
@@ -552,7 +631,7 @@ def prepare_visual(
             page_risk_reasons.append("multi_column_reading_order")
         if scanned:
             page_risk_reasons.append("scanned_page")
-        if ocr_status in {"unavailable", "failed"}:
+        if ocr_status in {"unavailable", "failed"} or ocr_issues:
             page_risk_reasons.extend(ocr_issues)
         page_condition_risk = 3 if scanned or ocr_status in {"unavailable", "failed"} else 2 if layout in {"multi_column", "mixed"} else 0
         page_risk = max([region["risk"] for region in regions] + [page_condition_risk])

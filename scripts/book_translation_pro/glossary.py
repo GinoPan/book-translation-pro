@@ -69,7 +69,7 @@ def save_glossary(project: Path, value: dict[str, Any]) -> None:
     atomic_write_text(project / "terminology" / "glossary-review.md", render_review(value))
 
 
-def _surface_pattern(surface: str) -> re.Pattern[str]:
+def _surface_pattern(surface: str, ignore_case: bool = True) -> re.Pattern[str]:
     escaped = re.escape(surface)
     if surface.isascii() and any(char.isalnum() for char in surface):
         # Match regular English inflections of the final word so "neural
@@ -78,12 +78,17 @@ def _surface_pattern(surface: str) -> re.Pattern[str]:
             escaped = re.escape(surface[:-1]) + r"(?:y|ies|y['’]s)"
         elif surface[-1].isalpha():
             escaped += r"(?:s|es|['’]s)?"
-        return re.compile(rf"(?<!\w){escaped}(?!\w)", re.IGNORECASE)
+        return re.compile(rf"(?<!\w){escaped}(?!\w)", re.IGNORECASE if ignore_case else 0)
     return re.compile(escaped)
 
 
 def entry_matches(entry: dict[str, Any], text: str) -> bool:
     return any(_surface_pattern(surface).search(text) for surface in [entry["source"], *entry.get("aliases", [])])
+
+
+def target_matches(entry: dict[str, Any], text: str) -> bool:
+    """Whether the approved target appears in ``text``: a whole word for Latin-script targets, in its approved case."""
+    return bool(_surface_pattern(entry["target"], ignore_case=False).search(text))
 
 
 def entry_hash(entry: dict[str, Any]) -> str:

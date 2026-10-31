@@ -45,6 +45,12 @@ MARKED_TARGET_CAPTION_RE = re.compile(
 # A regular-weight paragraph this short that opens with a label and number is
 # a caption; a longer one is prose citing the exhibit.
 PLAIN_CAPTION_MAX_CHARS = 80
+CAPTION_SEPARATOR_RE = re.compile(r"\s*[:：.．\-–—|]")
+# Verbs that open a sentence citing an exhibit ("图 3 给出总览。"), never a caption title.
+CITATION_VERBS = (
+    "给出", "显示", "表明", "展示", "列出", "说明", "反映", "描述", "概括", "总结", "介绍",
+    "呈现", "比较", "对比", "揭示", "指出", "所示", "表示",
+)
 # Target caption labels are recognized for these target languages only.
 CAPTION_LANGUAGES = ("zh", "en")
 PRINT_LAYOUT_LINE_RE = re.compile(
@@ -111,7 +117,15 @@ def _caption_matches(line: str) -> list[re.Match[str]]:
         return list(TARGET_CAPTION_RE.finditer(plain))
     stripped = plain.strip().strip("*_ ")
     opening = TARGET_CAPTION_RE.match(stripped)
-    return [opening] if opening and len(stripped) <= PLAIN_CAPTION_MAX_CHARS else []
+    if not opening or len(stripped) > PLAIN_CAPTION_MAX_CHARS:
+        return []
+    after = stripped[opening.end():]
+    if CAPTION_SEPARATOR_RE.match(after):
+        return [opening]
+    # Prose citing the exhibit continues with a verb, not a title: "Figure 3
+    # shows ..." in lower case, "图 3 给出总览。" with a citation verb.
+    rest = after.lstrip()
+    return [] if rest[:1].islower() or rest.startswith(CITATION_VERBS) else [opening]
 
 
 # How far from its caption an exhibit's image may sit, in Markdown lines;

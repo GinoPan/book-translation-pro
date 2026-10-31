@@ -314,6 +314,30 @@ class QualityGates(unittest.TestCase):
             report = qa_unit(Path(temp), QA_TARGET + self.TABLE_TARGET, QA_SOURCE + self.TABLE)
             self.assertEqual(statuses(report, "content.untranslated"), [])
 
+    def test_full_width_and_chinese_numeral_years_are_the_same_year(self) -> None:
+        for spelled in ("１９９８ 年", "一九九八年"):
+            with tempfile.TemporaryDirectory() as temp:
+                report = qa_unit(Path(temp), QA_TARGET.replace("1998 年", spelled))
+                self.assertEqual(statuses(report, "content.numbers"), [], spelled)
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), QA_TARGET.replace("1998 年", "一九八九年"))
+            self.assertEqual(statuses(report, "content.numbers"), ["fail"])
+
+    def test_cjk_source_left_untranslated_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), QA_TARGET, source=QA_TARGET)
+            self.assertEqual(statuses(report, "content.untranslated"), ["fail"])
+
+    def test_glossary_targets_match_whole_words_in_latin_text(self) -> None:
+        from book_translation_pro.glossary import target_matches
+
+        self.assertFalse(target_matches({"target": "art"}, "Work could start at dawn."))
+        self.assertTrue(target_matches({"target": "art"}, "Modern art changed the factory."))
+        self.assertTrue(target_matches({"target": "轴承预紧"}, "调整轴承预紧力。"))
+        # The approved spelling, including its case, is what the check enforces.
+        self.assertFalse(target_matches({"target": "iPhone"}, "The Iphone sold well."))
+        self.assertTrue(target_matches({"target": "iPhone"}, "Two iPhones sold well."))
+
     def test_changed_html_link_target_fails(self) -> None:
         source = QA_SOURCE.replace("careful records", 'careful <a href="https://example.com/records">records</a>')
         target = QA_TARGET.replace("仔细记录", '仔细<a href="https://example.com/{}">记录</a>')
