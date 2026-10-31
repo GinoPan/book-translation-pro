@@ -19,6 +19,7 @@ from xml.etree import ElementTree as ET
 from bs4 import BeautifulSoup
 
 from .alignment import create_segment_alignment, render_bilingual_markdown
+from .figures import TARGET_CAPTION_LABELS
 from .artifacts import (
     BTPError,
     atomic_copy,
@@ -1776,6 +1777,14 @@ def _append_field(paragraph: Any, instruction: str, placeholder: str = "1") -> N
         paragraph._p.append(run)
 
 
+# CT_SectPr children that follow w:type, in schema order.
+_SECT_PR_AFTER_TYPE = (
+    "w:pgSz", "w:pgMar", "w:paperSrc", "w:pgBorders", "w:lnNumType", "w:pgNumType", "w:cols", "w:formProt",
+    "w:vAlign", "w:noEndnote", "w:titlePg", "w:textDirection", "w:bidi", "w:rtlGutter", "w:docGrid",
+    "w:printerSettings", "w:sectPrChange",
+)
+
+
 def _set_page_number_format(section: Any, fmt: str, start: int | None) -> None:
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
@@ -1786,10 +1795,7 @@ def _set_page_number_format(section: Any, fmt: str, start: int | None) -> None:
         node = OxmlElement("w:pgNumType")
         # CT_SectPr is an ordered sequence; strict consumers reject a
         # pgNumType after docGrid.
-        sect_pr.insert_element_before(
-            node, "w:cols", "w:formProt", "w:vAlign", "w:noEndnote", "w:titlePg", "w:textDirection",
-            "w:bidi", "w:rtlGutter", "w:docGrid", "w:printerSettings", "w:sectPrChange",
-        )
+        sect_pr.insert_element_before(node, *_SECT_PR_AFTER_TYPE[_SECT_PR_AFTER_TYPE.index("w:cols"):])
     node.set(qn("w:fmt"), fmt)
     if start is None:
         node.attrib.pop(qn("w:start"), None)
@@ -1851,7 +1857,10 @@ def _add_book_sections(document: Any) -> None:
                 sect_pr.remove(child)
         section_type = OxmlElement("w:type")
         section_type.set(qn("w:val"), "oddPage")
-        sect_pr.insert(0, section_type)
+        # w:type follows footnotePr/endnotePr in the CT_SectPr sequence;
+        # python-docx later inserts the header and footer references ahead of
+        # whichever of those comes first.
+        sect_pr.insert_element_before(section_type, *_SECT_PR_AFTER_TYPE)
         ppr.append(sect_pr)
         break_p.append(ppr)
         paragraph._p.addprevious(break_p)
@@ -2039,7 +2048,7 @@ def _table_column_widths(document: Any, table: Any, target_total: int) -> list[i
     return widths
 
 
-FIGURE_CAPTION_RE = re.compile(r"^\s*(?:图表|图|表)\s*\d")
+FIGURE_CAPTION_RE = re.compile(rf"^\s*{TARGET_CAPTION_LABELS}\s*\d", re.IGNORECASE)
 
 
 def _keep_figures_with_captions(document: Any) -> None:
@@ -2110,12 +2119,17 @@ def _configure_tables(document: Any, options: dict[str, Any]) -> None:
         table_width.set(qn("w:w"), str(target))
         font_size = 8.5 if len(table.columns) >= 5 else 9
         row_count = len(table.rows)
+        # Pandoc marks a real header row with w:tblHeader.  A headerless pipe
+        # table (empty header row) arrives without it, and its first row is
+        # data that must not be bolded or repeated on every page.
+        first_tr_pr = table.rows[0]._tr.trPr if row_count else None
+        has_header = first_tr_pr is not None and first_tr_pr.find(qn("w:tblHeader")) is not None
         for row_index, row in enumerate(table.rows):
             # Tables stay on one page whenever they fit: no row splits across
             # pages (w:cantSplit) and every row except the last keeps with the
             # next, so Word moves the whole table to a fresh page instead of
             # breaking it.  Tables taller than a page still flow across pages
-            # with their header row repeated (w:tblHeader on the first row).
+            # with their header row repeated.
             tr_pr = row._tr.get_or_add_trPr()
             if tr_pr.find(qn("w:cantSplit")) is None:
                 cant_split = OxmlElement("w:cantSplit")
@@ -2126,10 +2140,7 @@ def _configure_tables(document: Any, options: dict[str, Any]) -> None:
                     header_or_height.addprevious(cant_split)
                 else:
                     tr_pr.append(cant_split)
-            if row_index == 0 and tr_pr.find(qn("w:tblHeader")) is None:
-                header = OxmlElement("w:tblHeader")
-                header.set(qn("w:val"), "true")
-                tr_pr.append(header)
+            is_header = row_index == 0 and has_header
             # Keep the header row attached to the first data rows: a header
             # stranded alone at a page bottom is a bad break.
             keep_with_next = row_index < row_count - 1
@@ -2138,7 +2149,7 @@ def _configure_tables(document: Any, options: dict[str, Any]) -> None:
                 for paragraph in cell.paragraphs:
                     paragraph.alignment = (
                         WD_ALIGN_PARAGRAPH.CENTER
-                        if row_index == 0
+                        if is_header
                         else WD_ALIGN_PARAGRAPH.LEFT
                     )
                     paragraph.paragraph_format.first_line_indent = Pt(0)  # None would inherit the 2-char body indent
@@ -2147,7 +2158,7 @@ def _configure_tables(document: Any, options: dict[str, Any]) -> None:
                     paragraph.paragraph_format.keep_with_next = keep_with_next
                     for run in paragraph.runs:
                         run.font.size = Pt(font_size)
-                        if row_index == 0:
+                        if is_header:
                             run.bold = True
         widths = _table_column_widths(document, table, target)
         grid = table._tbl.find(qn("w:tblGrid"))
@@ -2446,8 +2457,12 @@ def _libreoffice_export(docx_path: Path, pdf_path: Path) -> bool:
     soffice = find_binary("soffice")
     if not soffice:
         return False
+    # Keep the blank pages that odd-page section starts insert; LibreOffice
+    # skips them by default, which moves every later chapter opener onto a
+    # verso when the PDF is printed duplex.  (JSON filter options: LO 7.4+.)
+    pdf_filter = 'pdf:writer_pdf_Export:{"IsSkipEmptyPages":{"type":"boolean","value":"false"}}'
     result = subprocess.run(
-        [str(soffice), "--headless", "--convert-to", "pdf", "--outdir", str(pdf_path.parent), str(docx_path)],
+        [str(soffice), "--headless", "--convert-to", pdf_filter, "--outdir", str(pdf_path.parent), str(docx_path)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
     )
     produced = pdf_path.parent / f"{docx_path.stem}.pdf"

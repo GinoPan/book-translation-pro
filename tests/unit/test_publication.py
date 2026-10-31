@@ -416,13 +416,57 @@ class DocxLayoutTests(unittest.TestCase):
             self.assertEqual(len(document.sections), 1)
             self.assertEqual(document.sections[0]._sectPr.find(qn("w:pgNumType")).get(qn("w:fmt")), "decimal")
 
+    SECT_PR_SEQUENCE = (
+        "headerReference", "footerReference", "footnotePr", "endnotePr", "type", "pgSz", "pgMar", "paperSrc",
+        "pgBorders", "lnNumType", "pgNumType", "cols", "formProt", "vAlign", "noEndnote", "titlePg",
+        "textDirection", "bidi", "rtlGutter", "docGrid", "printerSettings", "sectPrChange",
+    )
+
+    def assert_schema_order(self, document) -> None:
+        for section in document.sections:
+            order = [child.tag.split("}")[1] for child in section._sectPr]
+            positions = [self.SECT_PR_SEQUENCE.index(tag) for tag in order]
+            self.assertEqual(positions, sorted(positions), order)
+
     def test_page_number_type_keeps_the_section_property_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _path, document = _laid_out_docx(directory, ["前言", "第一章 机器"])
-            for section in document.sections:
-                order = [child.tag.split("}")[1] for child in section._sectPr]
-                self.assertLess(order.index("pgNumType"), order.index("cols"), order)
-                self.assertEqual(order[-1], "docGrid", order)
+            self.assert_schema_order(document)
+
+    def test_pandoc_sections_with_footnotes_keep_the_schema_order(self) -> None:
+        import subprocess
+
+        from docx import Document
+
+        from book_translation_pro.publication import _publication_options, postprocess_docx
+        from book_translation_pro.runtime import find_binary
+
+        pandoc = find_binary("pandoc")
+        if not pandoc:
+            self.skipTest("pandoc is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "book.md"
+            source.write_text("# 前言\n\n前言。[^1]\n\n[^1]: 脚注。\n\n# 第一章 机器\n\n正文。\n\n# 第二章 工厂\n\n正文。\n",
+                              encoding="utf-8")
+            path = Path(directory) / "book.docx"
+            subprocess.run([str(pandoc), str(source), "-o", str(path)], check=True)
+            postprocess_docx(path, _publication_options({"project_id": "layout", "mode": "publication"}))
+            document = Document(path)
+            self.assertEqual(len(document.sections), 3)
+            self.assert_schema_order(document)
+
+    def test_libreoffice_export_keeps_inserted_blank_pages(self) -> None:
+        from unittest.mock import patch
+
+        from book_translation_pro import publication
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(publication, "find_binary", return_value=Path("soffice")), \
+                patch.object(publication.subprocess, "run") as run:
+            run.return_value.returncode = 1
+            publication._libreoffice_export(Path(directory) / "book.docx", Path(directory) / "book.pdf")
+            target = run.call_args.args[0][run.call_args.args[0].index("--convert-to") + 1]
+            self.assertIn('"IsSkipEmptyPages":{"type":"boolean","value":"false"}', target)
 
     def test_unrefreshed_toc_is_flagged_in_docx_and_blocks_pdf(self) -> None:
         import fitz

@@ -314,6 +314,28 @@ class QualityGates(unittest.TestCase):
             report = qa_unit(Path(temp), QA_TARGET + self.TABLE_TARGET, QA_SOURCE + self.TABLE)
             self.assertEqual(statuses(report, "content.untranslated"), [])
 
+    def test_changed_html_link_target_fails(self) -> None:
+        source = QA_SOURCE.replace("careful records", 'careful <a href="https://example.com/records">records</a>')
+        target = QA_TARGET.replace("仔细记录", '仔细<a href="https://example.com/{}">记录</a>')
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(statuses(qa_unit(Path(temp), target.format("records"), source), "content.urls"), [])
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(statuses(qa_unit(Path(temp), target.format("ledger"), source), "content.urls"), ["fail"])
+
+    def test_dropped_list_item_fails(self) -> None:
+        source = QA_SOURCE + "".join(
+            f"\n{marker} Check the hydraulic seals and the belt tension at station {name}." for marker, name in
+            (("1.", "one"), ("2.", "two"), ("3.", "three"))
+        ) + "\n"
+        items = "".join(f"\n{marker} 检查{name}号工位的液压密封件和皮带张力。" for marker, name in (("1.", "一"), ("2.", "二"), ("3.", "三")))
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), QA_TARGET + items + "\n", source)
+            self.assertEqual(statuses(report, "content.block_coverage"), [])
+        dropped = items.replace("\n2. 检查二号工位的液压密封件和皮带张力。", "")
+        with tempfile.TemporaryDirectory() as temp:
+            report = qa_unit(Path(temp), QA_TARGET + dropped + "\n", source)
+            self.assertEqual(statuses(report, "content.block_coverage"), ["fail"])
+
     def test_dropped_table_row_fails(self) -> None:
         dropped = self.TABLE_TARGET.replace("| 喷漆车间 | 每小时开始时记录喷漆室湿度 |\n", "")
         with tempfile.TemporaryDirectory() as temp:

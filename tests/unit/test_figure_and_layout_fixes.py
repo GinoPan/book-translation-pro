@@ -242,6 +242,7 @@ class FigureTablePageBreakTests(unittest.TestCase):
         return {"trim_width_mm": 170, "inside_margin_mm": 25, "outside_margin_mm": 20}
 
     def test_table_rows_cannot_split_and_keep_together(self) -> None:
+        from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
 
         document = Document()
@@ -249,6 +250,10 @@ class FigureTablePageBreakTests(unittest.TestCase):
         for row in table.rows:
             for cell in row.cells:
                 cell.text = "x"
+        # Pandoc marks a real header row this way.
+        header = OxmlElement("w:tblHeader")
+        header.set(qn("w:val"), "on")
+        table.rows[0]._tr.get_or_add_trPr().append(header)
         _configure_tables(document, self._options())
         for index, row in enumerate(table.rows):
             tr_pr = row._tr.get_or_add_trPr()
@@ -258,6 +263,30 @@ class FigureTablePageBreakTests(unittest.TestCase):
                 for paragraph in cell.paragraphs:
                     self.assertEqual(paragraph.paragraph_format.keep_with_next, keep)
         self.assertIsNotNone(table.rows[0]._tr.get_or_add_trPr().find(qn("w:tblHeader")))
+        self.assertTrue(all(run.bold for cell in table.rows[0].cells for p in cell.paragraphs for run in p.runs))
+
+    def test_headerless_pandoc_table_keeps_its_first_row_as_data(self) -> None:
+        import subprocess
+        import tempfile
+
+        from docx.oxml.ns import qn
+
+        from book_translation_pro.runtime import find_binary
+
+        pandoc = find_binary("pandoc")
+        if not pandoc:
+            self.skipTest("pandoc is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "table.md"
+            source.write_text("|  |  |\n|---|---|\n| 甲 | 乙 |\n| 1 | 2 |\n| 3 | 4 |\n", encoding="utf-8")
+            output = Path(directory) / "table.docx"
+            subprocess.run([str(pandoc), str(source), "-o", str(output)], check=True)
+            document = Document(output)
+            _configure_tables(document, self._options())
+            first = document.tables[0].rows[0]
+            self.assertEqual([cell.text for cell in first.cells], ["甲", "乙"])
+            self.assertIsNone(first._tr.get_or_add_trPr().find(qn("w:tblHeader")))
+            self.assertFalse(any(run.bold for cell in first.cells for p in cell.paragraphs for run in p.runs))
 
     def test_figure_stays_with_caption(self) -> None:
         import io
@@ -277,6 +306,21 @@ class FigureTablePageBreakTests(unittest.TestCase):
         self.assertTrue(figure_paragraph.paragraph_format.keep_together)
         self.assertTrue(caption_paragraph.paragraph_format.keep_with_next)
         self.assertFalse(body_paragraph.paragraph_format.keep_with_next)
+
+    def test_english_figure_stays_with_caption(self) -> None:
+        import io
+
+        document = Document()
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(buffer, format="PNG")
+        buffer.seek(0)
+        document.add_picture(buffer)
+        document.add_paragraph("Figure 6.8 The Coast Guard's missions")
+        document.add_paragraph("Body paragraph.")
+        _keep_figures_with_captions(document)
+        self.assertTrue(document.paragraphs[0].paragraph_format.keep_with_next)
+        self.assertTrue(document.paragraphs[1].paragraph_format.keep_with_next)
+        self.assertFalse(document.paragraphs[2].paragraph_format.keep_with_next)
 
 
 if __name__ == "__main__":
