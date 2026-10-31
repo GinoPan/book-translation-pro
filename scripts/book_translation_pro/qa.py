@@ -38,6 +38,7 @@ URL_TRAILING_PUNCTUATION = ".,;:!?，。；：！？\"'”’"
 FORMULA_RE = re.compile(r"(?<!\\)\$[^$\n]+\$|\\\[[\s\S]*?\\\]")
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 HTML_IMAGE_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+HTML_HREF_RE = re.compile(r"""<a\b[^>]*?\bhref\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 DATE_NAME_RE = re.compile(
     r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b",
     re.IGNORECASE,
@@ -93,6 +94,11 @@ def _table_signals(text: str) -> int:
 
 def _code_fences(text: str) -> int:
     return sum(1 for line in text.splitlines() if line.lstrip().startswith(("```", "~~~")))
+
+
+def _link_urls(markdown: str) -> Counter[str]:
+    """URLs in the visible text plus raw ``<a href>`` targets, which tag stripping would hide."""
+    return _urls(_comparison_text(markdown)) + _urls(" ".join(HTML_HREF_RE.findall(markdown)))
 
 
 def _comparison_text(markdown: str) -> str:
@@ -355,6 +361,7 @@ EXPANSION_WARN_RATIO = 2.0
 COPIED_BLOCK_MIN_WORDS = 6
 COPIED_SHARE_FAIL = 0.5
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?…])\s+")
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)])\s+", re.MULTILINE)
 
 
 def _prose_weight(text: str) -> float:
@@ -370,6 +377,14 @@ def _prose_blocks(markdown: str) -> list[str]:
         segment.text for segment in parse_blocks(_comparison_text(markdown))
         if segment.kind in PROSE_KINDS and _prose_weight(segment.text) > 0
     ]
+
+
+def _list_item_count(markdown: str) -> int:
+    """Items in Markdown lists; a dropped item leaves the list's block count unchanged."""
+    return sum(
+        len(_LIST_ITEM_RE.findall(segment.text))
+        for segment in parse_blocks(_comparison_text(markdown)) if segment.kind == "list"
+    )
 
 
 def _table_cells(markdown: str) -> list[str]:
@@ -410,6 +425,11 @@ def _coverage_checks(
     elif len(target_blocks) > len(source_blocks):
         _check(checks, "content.block_coverage", "warn",
                f"Target has {len(target_blocks)} prose blocks but the source has {len(source_blocks)}", unit_id)
+    source_items, target_items = _list_item_count(source), _list_item_count(target)
+    if target_items < source_items:
+        _check(checks, "content.block_coverage", "warn" if structural_evidence else "fail",
+               f"Target lists have {target_items} items but the source lists have {source_items}; "
+               "a list item may have been omitted", unit_id)
 
     # Table cells carry translatable language too, so they count toward size.
     source_cells = _table_cells(source)
@@ -635,7 +655,7 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
                 if (moved_source or moved_target) and not (moved_source - neighbor_gained) and not (moved_target - neighbor_lost):
                     status, message = "warn", "Numeric anchors moved to an adjacent unit during exhibit reconstruction"
             _check(checks, "content.numbers", status, message, unit_id)
-        if _urls(_comparison_text(source)) != _urls(_comparison_text(target)):
+        if _link_urls(source) != _link_urls(target):
             _check(checks, "content.urls", "fail", "URLs changed", unit_id)
 
         for term in select_entries(glossary, source, entry["book_node_id"]):
@@ -706,8 +726,8 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             item.get("target_units", [None])[0] if item.get("target_units") else None,
         )
 
-    source_book_urls = _urls(_comparison_text(merged_source))
-    target_book_urls = _urls(_comparison_text(merged_target))
+    source_book_urls = _link_urls(merged_source)
+    target_book_urls = _link_urls(merged_target)
     if source_book_urls != target_book_urls:
         _check(checks, "content.url_inventory", "fail", f"Book-level URLs changed: source={_compact_counter(source_book_urls)} target={_compact_counter(target_book_urls)}")
     else:

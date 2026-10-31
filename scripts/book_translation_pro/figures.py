@@ -36,10 +36,10 @@ SOURCE_CAPTION_RE = re.compile(
 # A list-of-figures entry: the title runs into a dot leader and a page number.
 LIST_LEADER_RE = re.compile(r"(?:\.\s*){4,}\S*\s*$|…{2,}")
 _CAPTION_KEY = r"([0-9]+(?:[.\-–][0-9]+)*[A-Z]?|[IVXLC]+\b)"
-_TARGET_LABELS = r"(?:图表|插图|图|表|exhibit|figure|fig\.|table|chart|plate|illustration|map)"
-TARGET_CAPTION_RE = re.compile(_TARGET_LABELS + r"\s*" + _CAPTION_KEY, re.IGNORECASE)
+TARGET_CAPTION_LABELS = r"(?:图表|插图|图|表|exhibit|figure|fig\.|table|chart|plate|illustration|map)"
+TARGET_CAPTION_RE = re.compile(TARGET_CAPTION_LABELS + r"\s*" + _CAPTION_KEY, re.IGNORECASE)
 MARKED_TARGET_CAPTION_RE = re.compile(
-    r"\*\*\s*" + _TARGET_LABELS + r"\s*" + _CAPTION_KEY + r"(?=[\s*／/（(:：.])",
+    r"\*\*\s*" + TARGET_CAPTION_LABELS + r"\s*" + _CAPTION_KEY + r"(?=[\s*／/（(:：.])",
     re.IGNORECASE,
 )
 # Target caption labels are recognized for these target languages only.
@@ -90,6 +90,49 @@ def _meaningful_image_refs(project: Path, markdown: str) -> Counter[str]:
             continue
         meaningful[ref] += count
     return meaningful
+
+
+def _caption_matches(line: str) -> list[re.Match[str]]:
+    """Caption labels on a target caption line: bold text (possibly in a span) or a heading.
+
+    Ordinary prose references are not a reliable location for a figure asset.
+    """
+    plain = re.sub(r"<[^>]+>", "", line)
+    marked = list(MARKED_TARGET_CAPTION_RE.finditer(plain))
+    if marked or not line.lstrip().startswith("#"):
+        return marked
+    return list(TARGET_CAPTION_RE.finditer(plain))
+
+
+# How far from its caption an exhibit's image may sit, in Markdown lines;
+# reconstruction inserts the image directly above the caption.
+CAPTION_IMAGE_LINES = 4
+
+
+def _caption_images(project: Path, text: str, caption_line: str) -> tuple[Counter[str], list[str]]:
+    """Real image assets beside one caption, not reaching past a neighbouring caption; missing files apart."""
+    lines = text.splitlines()
+    nearby: list[str] = []
+    for position, line in enumerate(lines):
+        if line.strip() != caption_line:
+            continue
+        for step in (-1, 1):
+            for index in range(position + step, position + step * (CAPTION_IMAGE_LINES + 1), step):
+                if not 0 <= index < len(lines) or _caption_matches(lines[index]):
+                    break
+                nearby.extend(IMAGE_RE.findall(lines[index]))
+    present: Counter[str] = Counter()
+    missing: list[str] = []
+    for ref, count in _meaningful_image_refs(project, "\n".join(f"![]({ref})" for ref in nearby)).items():
+        try:
+            exists = safe_project_path(project, ref.replace("\\", "/")).is_file()
+        except BTPError:
+            exists = False
+        if exists:
+            present[ref] += count
+        else:
+            missing.append(ref)
+    return present, missing
 
 
 def _source_exhibits(project: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -976,16 +1019,8 @@ def _target_caption_units(project: Path, config: dict[str, Any]) -> dict[str, li
         text = path.read_text(encoding="utf-8")
         for line in text.splitlines():
             # Match only a marked caption, not a prose reference that happens
-            # to contain a footnote span or another HTML wrapper.  Captions in
-            # the target are emitted as bold text (possibly inside a span) or
-            # as a Markdown heading; ordinary prose references are not a
-            # reliable location for a figure asset.
-            plain = re.sub(r"<[^>]+>", "", line)
-            marked = list(MARKED_TARGET_CAPTION_RE.finditer(plain))
-            if not marked and not line.lstrip().startswith("#"):
-                continue
-            matches = marked or list(TARGET_CAPTION_RE.finditer(plain))
-            for match in matches:
+            # to contain a footnote span or another HTML wrapper.
+            for match in _caption_matches(line):
                 key = _caption_key(match.group(1))
                 item = {
                     "unit_id": path.stem,
@@ -1078,15 +1113,21 @@ def run_figure_audit(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         unit_ids = sorted({entry["unit_id"] for entry in caption_units})
         label = f"{item['kind'].capitalize()} {key}"
         image_refs: Counter[str] = Counter()
+        missing_images: list[str] = []
         issues: list[str] = []
         table_signal_count = 0
+        texts: dict[str, str] = {}
         for unit_id in unit_ids:
             path = safe_project_path(project, f"target/{'edited' if config['passes']['edit'] else 'draft'}/{unit_id}.md")
-            if path.is_file():
-                target_text = path.read_text(encoding="utf-8")
-                image_refs.update(_meaningful_image_refs(project, target_text))
-                table_signal_count += sum(1 for line in target_text.splitlines() if line.count("|") >= 2)
+            texts[unit_id] = path.read_text(encoding="utf-8") if path.is_file() else ""
+            table_signal_count += sum(1 for line in texts[unit_id].splitlines() if line.count("|") >= 2)
             issues.extend(_observation_issues(project, unit_id))
+        # Only an image beside this exhibit's own caption, whose file exists,
+        # shows the exhibit; another exhibit's image in the same unit does not.
+        for entry in caption_units:
+            present, missing = _caption_images(project, texts[entry["unit_id"]], entry["caption_line"])
+            image_refs.update(present)
+            missing_images.extend(missing)
         structured = sorted(set(_declared_structured_reconstruction(issues)))
         if image_refs:
             disposition = "target_asset"
@@ -1111,7 +1152,9 @@ def run_figure_audit(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         else:
             disposition = "missing_visual_asset"
             status = "fail"
-            message = f"{label} has a target caption but no visual asset or reconstruction record"
+            message = f"{label} has a target caption but no visual asset or reconstruction record" + (
+                f"; referenced image file(s) missing: {', '.join(sorted(set(missing_images))[:4])}" if missing_images else ""
+            )
         figures.append({
             **item,
             "source_pages": sorted(set(item["source_pages"])),

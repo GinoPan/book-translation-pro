@@ -143,6 +143,36 @@ class FigureAuditTests(unittest.TestCase):
             self.assertEqual(dispositions, {("figure", "1"): "target_asset", ("table", "1"): "missing_target_caption"})
             self.assertFalse(report["passed"])
 
+    def test_missing_image_file_does_not_count_as_a_target_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._project(root, "![](assets/original/images/missing.png)\n\n**图表 1.1**　示例\n")
+            item = run_figure_audit(root, config)["figures"][0]
+            self.assertEqual((item["disposition"], item["status"]), ("missing_visual_asset", "fail"))
+            self.assertIn("missing.png", item["message"])
+
+    def test_another_exhibits_image_does_not_satisfy_this_caption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._project(root, "")
+            self._pdf(root, ["EXHIBIT 1.1", "EXHIBIT 1.2"])
+            image_dir = root / "assets" / "original" / "images"
+            image_dir.mkdir(parents=True)
+            Image.new("RGB", (64, 64), "white").save(image_dir / "exhibit-1-1.png")
+            (root / "target" / "edited" / "unit-0001.md").write_text(
+                "![](assets/original/images/exhibit-1-1.png)\n\n**图表 1.1**　示例\n\n正文。\n\n**图表 1.2**　其二\n",
+                encoding="utf-8",
+            )
+            dispositions = {item["key"]: item["disposition"] for item in run_figure_audit(root, config)["figures"]}
+            self.assertEqual(dispositions, {"1.1": "target_asset", "1.2": "missing_visual_asset"})
+            # A heading-style caption bounds the search just like a bold one.
+            (root / "target" / "edited" / "unit-0001.md").write_text(
+                "**图表 1.1**　示例\n\n## 图表 1.2　其二\n\n![](assets/original/images/exhibit-1-1.png)\n",
+                encoding="utf-8",
+            )
+            dispositions = {item["key"]: item["disposition"] for item in run_figure_audit(root, config)["figures"]}
+            self.assertEqual(dispositions, {"1.1": "missing_visual_asset", "1.2": "target_asset"})
+
     def test_uncaptioned_visuals_are_reported_not_passed_silently(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
