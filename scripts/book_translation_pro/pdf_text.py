@@ -12,7 +12,9 @@ paragraphs split by a page break.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +33,9 @@ BOLD_HEADING_MAX_LINES = 2
 MAX_HEADING_LEVELS = 3
 # Running heads and folios live in these top/bottom page bands.
 MARGIN_FRACTION = 0.08
-RUNNING_HEAD_MIN_PAGES = 2
-# A margin-band line set smaller than this (relative to body text) at the top
-# of a page is a running head even when it appears only once.
-RUNNING_HEAD_SIZE_RATIO = 0.95
+RUNNING_HEAD_MIN_PAGES = 3
+# Bold headings may be set a little smaller than body text.
+BOLD_HEADING_SIZE_RATIO = 0.95
 # Footnotes are small text in the lower part of a page whose marker also
 # appears, set even smaller, in the body of the same page.
 FOOTNOTE_SIZE_RATIO = 0.85
@@ -48,7 +49,9 @@ SCANNED_IMAGE_COVERAGE = 0.5
 MIN_IMAGE_PIXELS = 32
 PAGE_BREAK_PROBE_CHARS = 40
 PAGE_BREAK_SEARCH_BLOCKS = 6
-_FOLIO_RE = re.compile(r"^(?:\d{1,4}|[ivxlcdm]{1,8})$", re.IGNORECASE)
+# Arabic folios, or a well-formed roman numeral below 200 (front matter); a
+# word spelled with roman letters ("civil", "mix") is not a folio.
+_FOLIO_RE = re.compile(r"^(?:\d{1,4}|(?=[ivxlc])c?(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))$", re.IGNORECASE)
 _MARKUP_RE = re.compile(r"<[^>]+>|[*_`]")
 # A bare label such as "Chapter 3" or "Part II" is joined with the title that follows it.
 _LABEL_RE = re.compile(
@@ -91,16 +94,21 @@ def _text_blocks(page: Any) -> list[dict[str, Any]]:
     return [block for block in page.get_text("dict")["blocks"] if block.get("type") == 0 and _block_text(block)]
 
 
-def _has_text_layer(document: Any) -> bool:
+def _parse(document: Any) -> list[tuple[Any, list[dict[str, Any]]]]:
+    """Each page with its text blocks; layout parsing is the expensive step, so do it once."""
+    return [(page, _text_blocks(page)) for page in document]
+
+
+def _has_text_layer(parsed: list[tuple[Any, list[dict[str, Any]]]]) -> bool:
     """Scanned PDFs have none; they are left to the OCR preflight."""
-    return any(_text_blocks(page) for page in document)
+    return any(blocks for _page, blocks in parsed)
 
 
-def _body_size(document: Any) -> float:
+def _body_size(parsed: list[tuple[Any, list[dict[str, Any]]]]) -> float:
     """Most common font size, weighted by character count."""
     sizes: Counter[float] = Counter()
-    for page in document:
-        for block in _text_blocks(page):
+    for _page, blocks in parsed:
+        for block in blocks:
             for line in block["lines"]:
                 for span in line["spans"]:
                     sizes[round(float(span.get("size", 0)) * 2) / 2] += len(span.get("text", "").strip())
@@ -109,10 +117,10 @@ def _body_size(document: Any) -> float:
     return sizes.most_common(1)[0][0]
 
 
-def _heading_levels(document: Any, body: float) -> dict[float, int]:
+def _heading_levels(parsed: list[tuple[Any, list[dict[str, Any]]]], body: float) -> dict[float, int]:
     sizes = sorted({
         round(_line_size(line) * 2) / 2
-        for page in document for block in _text_blocks(page) for line in block["lines"]
+        for _page, blocks in parsed for block in blocks for line in block["lines"]
         if _is_heading_line(line, body)
     }, reverse=True)
     return {size: min(index + 1, MAX_HEADING_LEVELS) for index, size in enumerate(sizes)}
@@ -127,7 +135,7 @@ def _is_heading_line(line: dict[str, Any], body: float) -> bool:
         return len(text) <= MAX_HEADING_CHARS
     spans = [span for span in line.get("spans", []) if span.get("text", "").strip()]
     return (
-        size >= body * RUNNING_HEAD_SIZE_RATIO
+        size >= body * BOLD_HEADING_SIZE_RATIO
         and len(text) <= BOLD_HEADING_MAX_CHARS
         and not _HEADING_END_RE.search(text)
         and all(_is_bold(span) for span in spans)
@@ -141,21 +149,14 @@ def _is_heading_block(lines: list[dict[str, Any]], body: float) -> bool:
     return len(lines) <= BOLD_HEADING_MAX_LINES or any(_line_size(line) >= body * HEADING_SIZE_RATIO for line in lines)
 
 
-def heading_lines(pdf_path: Path) -> dict[str, int]:
-    """Map each heading line of the PDF (normalized) to a heading level."""
-    fitz = _fitz()
-    with fitz.open(pdf_path) as document:
-        if not _has_text_layer(document):
-            return {}
-        body = _body_size(document)
-        levels = _heading_levels(document, body)
-        result: dict[str, int] = {}
-        for page in document:
-            for block in _text_blocks(page):
-                if not _is_heading_block(block["lines"], body):
-                    continue
-                for line in block["lines"]:
-                    result.setdefault(_normalize(_line_text(line)), levels[round(_line_size(line) * 2) / 2])
+def _heading_map(parsed: list[tuple[Any, list[dict[str, Any]]]], body: float, levels: dict[float, int]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for _page, blocks in parsed:
+        for block in blocks:
+            if not _is_heading_block(block["lines"], body):
+                continue
+            for line in block["lines"]:
+                result.setdefault(_normalize(_line_text(line)), levels[round(_line_size(line) * 2) / 2])
     return result
 
 
@@ -213,69 +214,115 @@ def _band(page: Any, line: dict[str, Any]) -> str | None:
     return None
 
 
-def _running_heads(document: Any, body: float) -> set[str]:
-    """Margin-band lines that repeat (ignoring digits) on several pages."""
-    seen: Counter[str] = Counter()
-    for page in document:
-        keys = set()
-        for block in _text_blocks(page):
-            for line in block["lines"]:
-                if _band(page, line) and _line_size(line) < body * HEADING_SIZE_RATIO:
-                    keys.add(re.sub(r"\d+", "#", _normalize(_line_text(line))))
-        seen.update(keys)
-    return {key for key, count in seen.items() if key and count >= RUNNING_HEAD_MIN_PAGES}
+def _margin_block_band(page: Any, block: dict[str, Any]) -> str | None:
+    """The band a block lies in entirely; text that runs on into the body has none."""
+    bands = {_band(page, line) for line in block["lines"] if _line_text(line)}
+    return bands.pop() if len(bands) == 1 else None
 
 
-def _document_profile(document: Any) -> dict[str, Any]:
-    body = _body_size(document)
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100}
+
+
+def _folio_value(text: str) -> tuple[str, int] | None:
+    """("arabic"|"roman", value) for a folio-shaped line, else None."""
+    if not _FOLIO_RE.match(text):
+        return None
+    if text.isdigit():
+        return "arabic", int(text)
+    values = [_ROMAN_VALUES[char] for char in text.casefold()]
+    return "roman", sum(-value if index + 1 < len(values) and value < values[index + 1] else value for index, value in enumerate(values))
+
+
+def _running_keys(text: str, page_index: int) -> set[tuple[str, int | None]]:
+    """Ways a running-head line may repeat: verbatim, or with a folio replaced by "#".
+
+    A folio printed with the head ("12 A History of Work", "Page 3 of 120")
+    advances with the page, so its offset from the page index is constant;
+    a numbered label ("Problem 7") does not, and never forms a stable key.
+    """
+    candidates = []
+    if match := re.fullmatch(r"(\d{1,4})\s+(.+)", text):
+        candidates.append((match.group(2), int(match.group(1))))
+    if match := re.fullmatch(r"(.+?)\s+(\d{1,4})", text):
+        candidates.append((match.group(1), int(match.group(2))))
+    for match in re.finditer(r"\d{1,4}(?=\s*(?:of|/)\s*\d)", text):
+        candidates.append((text[:match.start()] + "#" + text[match.end():], int(match.group(0))))
+    return {(text, None)} | {(rest, number - page_index) for rest, number in candidates}
+
+
+def _margin_lines(parsed: list[tuple[Any, list[dict[str, Any]]]], body: float) -> Iterator[tuple[Any, str]]:
+    """(page, normalized text) of each non-heading line in a block lying wholly in a margin band."""
+    for page, blocks in parsed:
+        for block in blocks:
+            if _margin_block_band(page, block):
+                for line in block["lines"]:
+                    if _line_text(line) and _line_size(line) < body * HEADING_SIZE_RATIO:
+                        yield page, _normalize(_line_text(line))
+
+
+def _running_heads(parsed: list[tuple[Any, list[dict[str, Any]]]], body: float) -> set[tuple[str, int | None]]:
+    """Margin-band line keys that occur on several pages."""
+    occurrences = {
+        (page.number, key)
+        for page, text in _margin_lines(parsed, body)
+        if not _folio_value(text)
+        for key in _running_keys(text, page.number)
+    }
+    seen = Counter(key for _page, key in occurrences)
+    return {key for key, count in seen.items() if key[0] and count >= RUNNING_HEAD_MIN_PAGES}
+
+
+def _folio_offsets(parsed: list[tuple[Any, list[dict[str, Any]]]], body: float) -> set[tuple[str, int]]:
+    """Numbering offsets (folio value minus page index) seen on several pages."""
+    occurrences = {
+        (page.number, (folio[0], folio[1] - page.number))
+        for page, text in _margin_lines(parsed, body)
+        if (folio := _folio_value(text))
+    }
+    seen = Counter(offset for _page, offset in occurrences)
+    return {offset for offset, count in seen.items() if count >= RUNNING_HEAD_MIN_PAGES}
+
+
+def _document_profile(parsed: list[tuple[Any, list[dict[str, Any]]]]) -> dict[str, Any]:
+    body = _body_size(parsed)
+    levels = _heading_levels(parsed, body)
     return {
         "body": body,
-        "levels": _heading_levels(document, body),
-        "running": _running_heads(document, body),
+        "levels": levels,
+        "heading_map": _heading_map(parsed, body, levels),
+        "running": _running_heads(parsed, body),
+        "folios": _folio_offsets(parsed, body),
         # Chapter-title running heads repeat a heading of the book.
         "headings": {
             _normalize(_line_text(line))
-            for page in document for block in _text_blocks(page) for line in block["lines"]
+            for _page, blocks in parsed for block in blocks for line in block["lines"]
             if _line_size(line) >= body * HEADING_SIZE_RATIO
         },
     }
 
 
-def _furniture_kind(line: dict[str, Any], page: Any, profile: dict[str, Any]) -> str | None:
-    """Classify a margin-band running head ("header"/"footer") or folio ("page_number")."""
-    band = _band(page, line)
-    size = _line_size(line)
-    if band is None or size >= profile["body"] * HEADING_SIZE_RATIO:
+def _furniture_kind(line: dict[str, Any], block: dict[str, Any], page: Any, profile: dict[str, Any]) -> str | None:
+    """Classify a running head ("header"/"footer") or folio ("page_number").
+
+    Removal is destructive, so two signals are required: the line's block lies
+    wholly in a margin band, and the line is a folio whose number advances with
+    the page, repeats on several pages, or repeats a heading of the book.
+    Position, font size, or a number alone is never enough: poems and
+    epigraphs start at the top of a page in small type, and section numbers
+    or years can stand alone at a page edge.
+    """
+    band = _margin_block_band(page, block)
+    if band is None or _line_size(line) >= profile["body"] * HEADING_SIZE_RATIO:
         return None
     text = _normalize(_line_text(line))
     if not text:
         return None
-    if _FOLIO_RE.match(text):
-        return "page_number"
-    if (
-        re.sub(r"\d+", "#", text) in profile["running"]
-        or text in profile["headings"]
-        or (band == "top" and size < profile["body"] * RUNNING_HEAD_SIZE_RATIO)
-    ):
+    folio = _folio_value(text)
+    if folio:
+        return "page_number" if (folio[0], folio[1] - page.number) in profile["folios"] else None
+    if _running_keys(text, page.number) & profile["running"] or text in profile["headings"]:
         return "header" if band == "top" else "footer"
     return None
-
-
-def page_furniture(pdf_path: Path) -> list[dict[tuple[float, ...], str]]:
-    """Per page, the rounded line boxes of running heads and folios and their kind."""
-    fitz = _fitz()
-    with fitz.open(pdf_path) as document:
-        if not _has_text_layer(document):
-            return [{} for _page in document]
-        profile = _document_profile(document)
-        return [
-            {
-                tuple(round(float(value), 1) for value in line["bbox"]): kind
-                for block in _text_blocks(page) for line in block["lines"]
-                if (kind := _furniture_kind(line, page, profile))
-            }
-            for page in document
-        ]
 
 
 def _join_lines(lines: list[str]) -> str:
@@ -294,37 +341,77 @@ def _inner(rect: Any) -> Any:
     return fitz.Rect(rect.x0 + 0.5, rect.y0 + rect.height * 0.25, rect.x1 - 0.5, rect.y1 - rect.height * 0.25)
 
 
-def _pipe_table(rows: list[list[Any]]) -> str:
+def _pipe_table(rows: list[list[Any]], header: bool) -> str:
+    """Pipe table; without a recognisable header row the header is left empty,
+    as publication does, so Pandoc renders a headerless table."""
+
     def cell(value: Any) -> str:
         return " ".join(str(value or "").split()).replace("|", "\\|")
 
     width = max(len(row) for row in rows)
     grid = [[cell(row[index]) if index < len(row) else "" for index in range(width)] for row in rows]
-    lines = ["| " + " | ".join(grid[0]) + " |", "|" + "---|" * width]
-    lines.extend("| " + " | ".join(row) + " |" for row in grid[1:])
+    head, body = (grid[0], grid[1:]) if header else ([""] * width, grid)
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * width]
+    lines.extend("| " + " | ".join(row) + " |" for row in body)
     return "\n".join(lines)
+
+
+def _has_header(rows: list[list[Any]], first_row_spans: list[dict[str, Any]]) -> bool:
+    """A first row is a header when it is set bold, or holds labels over numeric data."""
+    first = [str(value or "") for value in rows[0]]
+    if not any(value.strip() for value in first):
+        return False
+    if first_row_spans and all(_is_bold(span) for span in first_row_spans):
+        return True
+
+    def numeric(values: list[Any]) -> bool:
+        return any(re.search(r"\d", str(value or "")) for value in values)
+
+    return not numeric(first) and any(numeric(row) for row in rows[1:])
+
+
+def _chars(text: str) -> Counter[str]:
+    return Counter(char for char in text if not char.isspace())
+
+
+def _char_diff(expected: Counter[str], actual: Counter[str]) -> str:
+    missing = "".join(sorted((expected - actual).elements()))
+    unexpected = "".join(sorted((actual - expected).elements()))
+    return f"missing {missing[:40]!r}, unexpected {unexpected[:40]!r}"
+
+
+def _log_removed(record: dict[str, Any], page_number: int, kind: str, text: str, bbox: Any) -> None:
+    box = [round(float(value), 1) for value in bbox]
+    record["removed"].append({"page": page_number, "kind": kind, "text": text, "bbox": box})
+
+
+def _center(bbox: Any) -> Any:
+    fitz = _fitz()
+    return fitz.Point((float(bbox[0]) + float(bbox[2])) / 2, (float(bbox[1]) + float(bbox[3])) / 2)
 
 
 def _token(kind: str, number: int) -> str:
     return f"BTP{kind}{number:04d}Z"
 
 
-def _page_layout(page: Any, profile: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+def _page_layout(page: Any, text_blocks: list[dict[str, Any]], profile: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
     """Find furniture, tables, figures, and linked footnotes on one page (read-only)."""
     fitz = _fitz()
     body = profile["body"]
     page_number = page.number + 1
-    text_blocks = _text_blocks(page)
     lines = [(block, line) for block in text_blocks for line in block["lines"] if _line_text(line)]
     layout: dict[str, Any] = {"redact": [], "image_redact": [], "tables": [], "figures": [], "tokens": []}
     removed: set[int] = set()
 
+    def remove(line: dict[str, Any], kind: str) -> None:
+        layout["redact"].append(_inner(fitz.Rect(line["bbox"])))
+        removed.add(id(line))
+        _log_removed(record, page_number, kind, _line_text(line), line["bbox"])
+
     for block, line in lines:
-        kind = _furniture_kind(line, page, profile)
+        kind = _furniture_kind(line, block, page, profile)
         if kind:
-            layout["redact"].append(_inner(fitz.Rect(line["bbox"])))
-            removed.add(id(line))
-            record["stats"]["furniture_lines_removed"] += 1
+            remove(line, kind)
 
     try:
         found = page.find_tables().tables
@@ -337,14 +424,27 @@ def _page_layout(page: Any, profile: dict[str, Any], record: dict[str, Any]) -> 
         if len(rows) < 2 or max(len(row) for row in rows) < 2:
             continue
         rect = fitz.Rect(table.bbox)
+        inside = [line for _block, line in lines if id(line) not in removed and rect.contains(_center(line["bbox"]))]
+        page_chars = _chars(" ".join(_line_text(line) for line in inside))
+        cell_chars = _chars(" ".join(str(value or "") for row in rows for value in row))
+        if page_chars != cell_chars:
+            # The cells would replace the page text, so they must hold exactly that text.
+            record["warnings"].append(
+                f"Table on page {page_number} left as text: its cells do not match the page text "
+                f"({_char_diff(page_chars, cell_chars)})"
+            )
+            continue
+        row_box = fitz.Rect(table.rows[0].bbox)
+        first_row_spans = [
+            span for line in inside for span in line["spans"]
+            if span.get("text", "").strip() and row_box.contains(_center(span["bbox"]))
+        ]
         table_rects.append(rect)
         number = len(record["tables"]) + 1
-        record["tables"][f"{number:04d}"] = {"page": page_number, "markdown": _pipe_table(rows)}
-        layout["redact"].append(rect + (1, 1, -1, -1))
+        record["tables"][f"{number:04d}"] = {"page": page_number, "markdown": _pipe_table(rows, _has_header(rows, first_row_spans))}
+        for line in inside:
+            remove(line, "table")
         layout["tokens"].append((fitz.Point(rect.x0, rect.y0 + 9), _token("TB", number), 8))
-        for _block, line in lines:
-            if rect.contains(fitz.Point(line["bbox"][0], _line_center_y(line))):
-                removed.add(id(line))
 
     image_rects = []
     for image in page.get_images(full=True):
@@ -366,7 +466,7 @@ def _page_layout(page: Any, profile: dict[str, Any], record: dict[str, Any]) -> 
             continue
         inside = [
             item for item in lines
-            if item[1] is not line and crop.contains(fitz.Point((item[1]["bbox"][0] + item[1]["bbox"][2]) / 2, _line_center_y(item[1])))
+            if item[1] is not line and crop.contains(_center(item[1]["bbox"]))
         ]
         if sum(len(_line_text(item[1])) for item in inside) > FIGURE_MAX_LABEL_CHARS:
             continue
@@ -377,8 +477,7 @@ def _page_layout(page: Any, profile: dict[str, Any], record: dict[str, Any]) -> 
         layout["figures"].append(crop)
         layout["image_redact"].extend(rect for rect in image_rects if crop.contains(rect) or (crop & rect).get_area() > 0.5 * rect.get_area())
         for _block, label in inside:
-            layout["redact"].append(_inner(fitz.Rect(label["bbox"])))
-            removed.add(id(label))
+            remove(label, "figure_label")
         record["figures"].append({"page": page_number, "caption": _line_text(line), "crop_bbox": [round(float(value), 2) for value in crop]})
 
     notes: list[dict[str, Any]] = []
@@ -414,9 +513,10 @@ def _page_layout(page: Any, profile: dict[str, Any], record: dict[str, Any]) -> 
         number = len(record["footnotes"]) + 1
         record["footnotes"][f"{number:04d}"] = {"page": page_number, "marker": note["marker"], "text": note["text"]}
         layout["redact"].append(_inner(reference[1]))
-        layout["redact"].extend(_inner(fitz.Rect(line["bbox"])) for line in note["lines"])
+        _log_removed(record, page_number, "footnote_marker", reference[0], reference[1])
+        for line in note["lines"]:
+            remove(line, "footnote")
         layout["tokens"].append((fitz.Point(reference[1].x0, reference[1].y1 - 1), _token("FN", number), 1))
-        removed.update(id(line) for line in note["lines"])
 
     flow = [
         [line for line in block["lines"] if _line_text(line) and id(line) not in removed]
@@ -447,16 +547,25 @@ def clean_pdf(source: Path, destination: Path) -> dict[str, Any]:
         "footnotes": {},
         "figures": [],
         "page_breaks": [],
+        # Every line or marker taken out of the cleaned copy, with its text and box.
+        "removed": [],
+        # Normalized heading line -> level, for promoting Calibre's paragraphs.
+        "headings": {},
         "warnings": [],
-        "stats": {"furniture_lines_removed": 0, "footnotes_unlinked": 0},
+        "stats": {"footnotes_unlinked": 0},
     }
     text_none = getattr(fitz, "PDF_REDACT_TEXT_NONE", 1)
+    unbalanced: list[tuple[int, str]] = []
     with fitz.open(source) as document:
-        has_text = _has_text_layer(document)
-        profile = _document_profile(document) if has_text else {}
+        parsed = _parse(document)
+        has_text = _has_text_layer(parsed)
+        profile = _document_profile(parsed) if has_text else {}
+        record["headings"] = profile.get("heading_map", {})
         previous_tail: str | None = None
-        for page in document if has_text else []:
-            layout = _page_layout(page, profile, record)
+        for page, blocks in parsed if has_text else []:
+            original_chars = _chars(page.get_text())
+            first_removed = len(record["removed"])
+            layout = _page_layout(page, blocks, profile, record)
             if previous_tail and layout["head"] and _continues(previous_tail, layout["head"]):
                 record["page_breaks"].append({
                     "page": page.number + 1,
@@ -478,14 +587,41 @@ def clean_pdf(source: Path, destination: Path) -> dict[str, Any]:
                 page.insert_text(point, token, fontsize=size)
             for crop, pixmap in renders:
                 page.insert_image(crop, pixmap=pixmap)
+            # Conservation: what is left plus what was logged must be exactly the page text.
+            left = _chars(page.get_text())
+            for _point, token, _size in layout["tokens"]:
+                left.subtract(_chars(token))
+            logged = _chars("".join(item["text"] for item in record["removed"][first_removed:]))
+            if +(left + logged) != original_chars:
+                unbalanced.append((page.number, _char_diff(original_chars, +(left + logged))))
+        if unbalanced:
+            with fitz.open(source) as original:
+                for index, detail in unbalanced:
+                    document.insert_pdf(original, from_page=index, to_page=index, start_at=index)
+                    document.delete_page(index + 1)
+                    _forget_page(record, index + 1)
+                    record["warnings"].append(
+                        f"Layout cleaning was undone on page {index + 1}: the text removed from it "
+                        f"does not match the removal log ({detail})"
+                    )
         destination.parent.mkdir(parents=True, exist_ok=True)
         document.save(destination, garbage=3, deflate=True)
     record["stats"].update({
+        "furniture_lines_removed": sum(item["kind"] in {"header", "footer", "page_number"} for item in record["removed"]),
         "tables": len(record["tables"]),
         "footnotes_linked": len(record["footnotes"]),
         "figures_rendered": len(record["figures"]),
+        "pages_restored_unchanged": len(unbalanced),
     })
     return record
+
+
+def _forget_page(record: dict[str, Any], page_number: int) -> None:
+    """Drop the layout entries of a page whose original was put back."""
+    for key in ("tables", "footnotes"):
+        record[key] = {number: item for number, item in record[key].items() if item["page"] != page_number}
+    for key in ("figures", "removed"):
+        record[key] = [item for item in record[key] if item["page"] != page_number]
 
 
 def _block_starts(block: str, probe: str) -> bool:
@@ -505,7 +641,7 @@ def _movable(block: str) -> bool:
 
 
 def _join_blocks(first: str, second: str) -> str:
-    first, second = first.rstrip(), second.lstrip()
+    first, second = first.rstrip(), second.strip()
     plain_first, plain_second = _normalize(first), _normalize(second)
     if re.search(r"[^\W\d_]-$", first) and plain_second[:1].islower():
         return first[:-1] + second
@@ -560,7 +696,9 @@ def restore_layout_markup(markdown: str, record: dict[str, Any]) -> tuple[str, d
                     stats["page_breaks_joined"] += 1
                     break
                 if _EMPTY_BLOCK_RE.match(blocks[following]):
-                    continue  # layout residue between the halves is dropped
+                    if "<a id=" in blocks[following]:
+                        moved.append(following)  # a link target is carried, never dropped
+                    continue  # other layout residue between the halves is dropped
                 if _movable(blocks[following]):
                     moved.append(following)
                     continue
@@ -583,13 +721,55 @@ def restore_layout_markup(markdown: str, record: dict[str, Any]) -> tuple[str, d
     return "\n\n".join(blocks).rstrip() + "\n", stats
 
 
+# Markup in the working draft that is not source text: tags, link targets, footnote labels.
+_DRAFT_MARKUP_RE = re.compile(r"<[^>]+>|\]\([^)]*\)|\[\^fn\d+\]:?")
+# Removed text that does not come back into the draft (tables and notes do).
+_DROPPED_KINDS = {"header", "footer", "page_number", "figure_label", "footnote_marker"}
+_WORD_RE = re.compile(r"[^\W_]+")
+
+
+def _alnum(text: str) -> Counter[str]:
+    return Counter(char for char in unicodedata.normalize("NFKC", text).casefold() if char.isalnum())
+
+
+def missing_source_text(source: Path, markdown: str, record: dict[str, Any]) -> dict[str, Any]:
+    """Letters and digits of the PDF text layer that are neither in the draft nor in the removal log.
+
+    clean_pdf proves its own removals balance; this checks the whole pipeline
+    (cleaning, Calibre or PyMuPDF, Pandoc, token restoration) end to end.
+    Comparing characters rather than words keeps hyphenation, line breaks,
+    and CJK spacing from counting as losses.
+    """
+    fitz = _fitz()
+    with fitz.open(source) as document:
+        # The default text flags (as clean_pdf and the extractors use), plus dehyphenation.
+        source_text = "\n".join(page.get_text(flags=fitz.TEXTFLAGS_TEXT | fitz.TEXT_DEHYPHENATE) for page in document)
+    # Extra text in the draft would mask losses, so only text that is really
+    # gone is subtracted: dropped furniture and labels, and each note's own
+    # leading marker (its definition line starts with a label instead).
+    dropped = [item["text"] for item in record.get("removed", []) if item["kind"] in _DROPPED_KINDS]
+    dropped += [note["marker"] for note in record.get("footnotes", {}).values()]
+    removed_text = " ".join(item["text"] for item in record.get("removed", []))
+    draft = _DRAFT_MARKUP_RE.sub(" ", markdown)
+    missing = _alnum(source_text) - _alnum(" ".join(dropped)) - _alnum(draft)
+    if not missing:
+        return {"missing_characters": 0, "words_not_found": []}
+    # Words that occur nowhere in the draft, even inside a longer word (so the
+    # halves of a rejoined "ho-urs" are not listed), hint at what was lost.
+    known = unicodedata.normalize("NFKC", f"{draft} {removed_text}").casefold()
+    known_words = set(_WORD_RE.findall(known))
+    candidates = set(_WORD_RE.findall(unicodedata.normalize("NFKC", source_text).casefold())) - known_words
+    absent = sorted(word for word in candidates if word not in known)
+    return {"missing_characters": sum(missing.values()), "words_not_found": absent[:20]}
+
+
 def extract_markdown(pdf_path: Path, project: Path, image_dir: Path) -> tuple[str, dict[str, Any]]:
     """Extract a PDF's text layer to Markdown with headings, reading order, and images."""
     fitz = _fitz()
     parts: list[str] = []
     stats = {"pages": 0, "headings": 0, "images": 0, "margin_lines_removed": 0}
     with fitz.open(pdf_path) as document:
-        profile = _document_profile(document)
+        profile = _document_profile(_parse(document))
         body, levels = profile["body"], profile["levels"]
         for page_number, page in enumerate(document, 1):
             stats["pages"] += 1
@@ -609,7 +789,7 @@ def extract_markdown(pdf_path: Path, project: Path, image_dir: Path) -> tuple[st
                     continue
                 lines = []
                 for line in block["lines"]:
-                    if _furniture_kind(line, page, profile):
+                    if _furniture_kind(line, block, page, profile):
                         stats["margin_lines_removed"] += 1
                     elif _line_text(line):
                         lines.append(line)
