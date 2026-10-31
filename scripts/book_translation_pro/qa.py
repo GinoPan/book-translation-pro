@@ -13,7 +13,8 @@ from .artifacts import BTPError, atomic_write_json, atomic_write_text, hash_data
 from .exceptions import approved_exception_ids
 from .glossary import load_effective_glossary, select_entries
 from .manifest import load_manifest, validate_manifest_sources
-from .state import load_state, now_utc, save_state
+from .config import config_drifted
+from .state import load_state, now_utc, recorded_dependencies, save_state, unit_dependencies
 from .publication import (
     clean_markdown_for_publication,
     prepare_publication_markdown,
@@ -23,7 +24,7 @@ from .publication import (
     merge_edited_units,
 )
 from .rights import publication_rights_issues, rights_warning
-from .structure import IMAGE_RE
+from .structure import IMAGE_RE, parse_blocks
 from .figures import run_figure_audit
 from .visual import run_visual_qa
 
@@ -250,7 +251,11 @@ def _variation_status(
 ) -> tuple[str, str]:
     """Classify unit-local differences without masking high-confidence edits."""
     source_issues = observation.get("source_issues", [])
-    ratio = min(len(source), len(target)) / max(1, max(len(source), len(target)))
+    # Compare content size, not raw characters: Chinese is about a third the
+    # character count of equivalent English, which made every EN->ZH unit look
+    # "reflowed" and downgraded real numeric errors to warnings.
+    source_weight, target_weight = _prose_weight(source), _prose_weight(target)
+    ratio = min(source_weight, target_weight) / max(1.0, source_weight, target_weight)
     if check_id == "content.numbers":
         source_numbers = _number_tokens(source)
         target_numbers = _number_tokens(target)
@@ -287,6 +292,87 @@ def _variation_status(
             return "warn", f"formula-like layout differs after cleanup; evidence: {evidence}"
         return "fail", "Formula structure changed"
     return "warn", "unit-local structure was reflowed or reconstructed; book-level inventory is authoritative"
+
+
+_CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]")
+_WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
+# One English word carries roughly as much content as 1.5-1.8 Chinese
+# characters, so a CJK character counts as 0.6 of a word.  This keeps length
+# comparisons meaningful across Latin and CJK scripts.
+CJK_CHAR_WEIGHT = 0.6
+PROSE_KINDS = {"paragraph", "list", "heading"}
+# Observation evidence that legitimately removes or merges prose blocks.
+STRUCTURE_EVIDENCE_PREFIXES = ("source_figure_reconstructed", "source_cover_rebuilt", "structure_reflowed")
+UNTRANSLATED_EVIDENCE_PREFIX = "untranslated_by_design"
+MIN_RATIO_WEIGHT = 40
+TRUNCATION_FAIL_RATIO = 0.5
+TRUNCATION_WARN_RATIO = 0.7
+EXPANSION_WARN_RATIO = 2.0
+COPIED_BLOCK_MIN_WORDS = 6
+COPIED_SHARE_FAIL = 0.5
+
+
+def _prose_weight(text: str) -> float:
+    """Script-neutral content size: Latin-script words plus weighted CJK characters."""
+    cjk = len(_CJK_RE.findall(text))
+    words = len(_WORD_RE.findall(_CJK_RE.sub(" ", text)))
+    return words + cjk * CJK_CHAR_WEIGHT
+
+
+def _prose_blocks(markdown: str) -> list[str]:
+    """Translatable prose blocks after removing markup, images, and print residue."""
+    return [
+        segment.text for segment in parse_blocks(_comparison_text(markdown))
+        if segment.kind in PROSE_KINDS and _prose_weight(segment.text) > 0
+    ]
+
+
+def _has_evidence(observation: dict[str, Any], prefixes: tuple[str, ...] | str) -> bool:
+    return any(str(issue).startswith(prefixes) for issue in observation.get("source_issues", []))
+
+
+def _coverage_checks(
+    checks: list[dict[str, Any]], unit_id: str, source: str, target: str, observation: dict[str, Any]
+) -> None:
+    """Detect omitted paragraphs, truncation, and source text left untranslated."""
+    source_blocks = _prose_blocks(source)
+    target_blocks = _prose_blocks(target)
+    structural_evidence = _has_evidence(observation, STRUCTURE_EVIDENCE_PREFIXES)
+    if len(target_blocks) < len(source_blocks):
+        status = "warn" if structural_evidence else "fail"
+        _check(checks, "content.block_coverage", status,
+               f"Target has {len(target_blocks)} prose blocks but the source has {len(source_blocks)}; "
+               "a paragraph, heading, or list may have been omitted or merged", unit_id)
+    elif len(target_blocks) > len(source_blocks):
+        _check(checks, "content.block_coverage", "warn",
+               f"Target has {len(target_blocks)} prose blocks but the source has {len(source_blocks)}", unit_id)
+
+    source_weight = sum(_prose_weight(block) for block in source_blocks)
+    target_weight = sum(_prose_weight(block) for block in target_blocks)
+    if source_weight >= MIN_RATIO_WEIGHT:
+        ratio = target_weight / source_weight
+        message = f"Target content is {ratio:.0%} of the source length"
+        if ratio < TRUNCATION_FAIL_RATIO:
+            _check(checks, "content.length_ratio", "warn" if structural_evidence else "fail",
+                   message + "; the translation looks truncated or incomplete", unit_id)
+        elif ratio < TRUNCATION_WARN_RATIO:
+            _check(checks, "content.length_ratio", "warn", message + "; check for omitted sentences", unit_id)
+        elif ratio > EXPANSION_WARN_RATIO:
+            _check(checks, "content.length_ratio", "warn", message + "; check for added content", unit_id)
+
+    normalized_source = {" ".join(block.split()) for block in source_blocks}
+    copied = [
+        block for block in target_blocks
+        if " ".join(block.split()) in normalized_source
+        and len(_WORD_RE.findall(_CJK_RE.sub(" ", block))) >= COPIED_BLOCK_MIN_WORDS
+    ]
+    if copied and target_weight:
+        share = sum(_prose_weight(block) for block in copied) / target_weight
+        by_design = _has_evidence(observation, UNTRANSLATED_EVIDENCE_PREFIX)
+        status = "fail" if share >= COPIED_SHARE_FAIL and not by_design else "warn"
+        _check(checks, "content.untranslated", status,
+               f"{len(copied)} prose block(s) ({share:.0%} of the target) are identical to the source text; "
+               f"first: {copied[0][:80]!r}", unit_id)
 
 
 def _heading_keys(markdown: str) -> set[str]:
@@ -347,6 +433,8 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
 
     if hash_data(config) != manifest["resolved_config_hash"]:
         _check(checks, "config.hash", "fail", "Resolved configuration differs from the prepared manifest")
+    if config_drifted(project, manifest["resolved_config_hash"]):
+        _check(checks, "config.yaml_changed", "fail", "book-project.yaml changed since prepare; run prepare")
 
     for error in validate_manifest_sources(project, manifest):
         _check(checks, "manifest.source", "fail", error)
@@ -409,6 +497,21 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         except BTPError as exc:
             _check(checks, "observation.invalid", "fail", str(exc), unit_id)
 
+        _coverage_checks(checks, unit_id, source, target, observation)
+        if record.get("status") not in {"completed", "skipped_approved"}:
+            _check(checks, "unit.status", "fail",
+                   f"Unit status is {record.get('status', 'missing')!r}; run plan and complete it", unit_id)
+        else:
+            current = unit_dependencies(project, manifest, config, glossary, unit_id)
+            recorded = recorded_dependencies(record, manifest, config)
+            if record.get("status") == "skipped_approved":
+                # Markup-only units are copied verbatim; only their source matters.
+                current = {"source": current["source"]}
+            stale = sorted(key for key in set(current) | set(recorded) if current.get(key) != recorded.get(key))
+            if stale:
+                _check(checks, "unit.stale", "fail",
+                       f"Translated against outdated inputs ({', '.join(stale)}); rerun plan and retranslate", unit_id)
+
         source_images = _meaningful_image_refs(project, source)
         target_images = _meaningful_image_refs(project, target)
         if source_images != target_images:
@@ -453,9 +556,9 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
                     )
                     neighbor_tokens.update(target_tokens_by_unit.get(neighbor_id, Counter()))
                     neighbor_tokens.update(source_tokens_by_unit.get(neighbor_id, Counter()))
-                if moved_source and not moved_source - neighbor_tokens:
-                    status, message = "warn", "Numeric anchors moved to an adjacent unit during exhibit reconstruction"
-                elif moved_target and not moved_target - neighbor_tokens:
+                # Both directions must be explained by the neighbours; otherwise a
+                # changed value (1998 -> 1989) hides behind a common number.
+                if (moved_source or moved_target) and not (moved_source - neighbor_tokens) and not (moved_target - neighbor_tokens):
                     status, message = "warn", "Numeric anchors moved to an adjacent unit during exhibit reconstruction"
             _check(checks, "content.numbers", status, message, unit_id)
         if _urls(_comparison_text(source)) != _urls(_comparison_text(target)):
@@ -503,7 +606,12 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     target_caption_keys = _caption_keys(merged_target)
     missing_captions = sorted(source_caption_keys - target_caption_keys)
     if missing_captions:
-        _check(checks, "structure.caption_inventory", "fail", f"Figure/table caption keys missing from target: {', '.join(missing_captions)}")
+        # Target caption recognition knows English and Chinese labels only;
+        # for other targets a mismatch is reported but cannot be judged.
+        recognized = str(config["target"]["language"]).lower().startswith(("zh", "en"))
+        _check(checks, "structure.caption_inventory", "fail" if recognized else "warn",
+               f"Figure/table caption keys missing from target: {', '.join(missing_captions)}"
+               + ("" if recognized else " (caption labels are only recognized for English and Chinese targets)"))
     else:
         _check(checks, "structure.caption_inventory", "pass", f"Target contains all {len(source_caption_keys)} source figure/table caption keys")
 

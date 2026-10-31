@@ -31,6 +31,11 @@ The following are blocking in every mode:
 - Blank output or unparsed source region
 - Broken local resource or note/reference link
 - Unapproved skipped content
+- A unit whose prose block count drops below the source (`content.block_coverage`) unless the observation records `structure_reflowed: <reason>` or a figure reconstruction
+- A unit whose content length is under half of the source (`content.length_ratio`; Latin words and CJK characters are weighted 1 to 0.6)
+- A unit where at least half the prose is copied verbatim from the source (`content.untranslated`) unless the observation records `untranslated_by_design: <reason>`
+- A unit whose recorded dependencies (source, translation-relevant configuration, Book Map node, Style Guide, incoming capsule, glossary selection, page evidence) no longer match, or whose status is not `completed` (`unit.stale`, `unit.status`)
+- A changed number or year; numeric differences are downgraded only when content was demonstrably reflowed, or when the unmatched values on both sides appear in a neighbouring unit
 
 Deterministic checks should also compare heading counts, image/table/formula references, numbers and units, footnote/endnote anchors and placement, untranslated residue, and glossary variants. Footnote markers must remain superscript references attached to the intended term; they must not become quantity words such as “11个 5S”. Differences may be warnings only when a reviewed explanation exists.
 
@@ -56,4 +61,3 @@ Deterministic checks should also compare heading counts, image/table/formula ref
 ## Human review gate
 
 Publication requires explicit review records for opening matter/TOC, chapter openings, all complex visuals, note-dense content, back matter, navigation, and narrow/mobile rendering. The final signoff is tied to the current clean Markdown master hash; any later edit invalidates it. Study reports what was sampled. Fast must never imply human review occurred when it did not.
-- For PDF inputs, `reconstruct-figures` output is retained as evidence for deterministic source crops; a crop alone does not satisfy the gate until the target Markdown references it (or the target has an explicit structured reconstruction record).

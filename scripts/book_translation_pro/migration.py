@@ -57,7 +57,7 @@ def migrate_project(project: Path) -> dict[str, Any]:
     only adds release metadata. QA/build are invalidated so the new gates run,
     but no work unit is silently scheduled for retranslation.
     """
-    from .config import load_yaml, resolve_config, write_yaml
+    from .config import load_yaml, resolve_config, translation_config_hash, write_yaml
 
     config_path = project / "book-project.yaml"
     raw = load_yaml(config_path)
@@ -87,7 +87,7 @@ def migrate_project(project: Path) -> dict[str, Any]:
         for record in state.get("units", {}).values():
             dependencies = record.get("dependency_hashes", {})
             if "config" in dependencies:
-                dependencies["config"] = new_config_hash
+                dependencies["config"] = translation_config_hash(resolved)
         for stage_name in ("qa", "build"):
             stage = state.get("stages", {}).get(stage_name)
             if stage and stage.get("status") in {"completed", "skipped_approved"}:

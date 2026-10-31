@@ -33,7 +33,8 @@ def create_review_template(project: Path) -> dict[str, Any]:
         "reviewer": "",
         "reviewed_at": now_utc(),
         "checks": [
-            {"id": check_id, "status": "approved", "notes": "", "evidence": []}
+            # Each check starts pending so an unedited template cannot be recorded.
+            {"id": check_id, "status": "pending", "notes": "", "evidence": []}
             for check_id in REQUIRED_REVIEW_CHECKS
         ],
     }
@@ -43,6 +44,12 @@ def create_review_template(project: Path) -> dict[str, Any]:
 
 def record_publication_review(project: Path, source: Path) -> dict[str, Any]:
     value = load_json(source)
+    pending = [item.get("id") for item in value.get("checks", []) if item.get("status") == "pending"]
+    if pending:
+        raise BTPError(
+            "Publication review still has pending checks: " + ", ".join(map(str, pending))
+            + "; inspect the rendered candidate and set each to approved or exception"
+        )
     validate_schema(value, "publication-review.schema.json")
     candidate_path = project / "qa" / "typeset-preview.json"
     if value["candidate_sha256"] != sha256_file(candidate_path):

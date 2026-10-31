@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 
 from book_translation_pro.alignment import create_segment_alignment, render_bilingual_markdown
-from book_translation_pro.artifacts import atomic_write_json, atomic_write_text, hash_data, sha256_file
-from book_translation_pro.config import load_resolved_project, write_yaml
+from book_translation_pro.artifacts import BTPError, atomic_write_json, atomic_write_text, hash_data, sha256_file
+from book_translation_pro.config import load_resolved_project, translation_config_hash, write_yaml
 from book_translation_pro.exceptions import approved_exception_ids, save_exceptions
 from book_translation_pro.glossary import load_effective_glossary, save_glossary
 from book_translation_pro.migration import migrate_project
@@ -54,12 +54,14 @@ class V1ContractTests(unittest.TestCase):
             })
 
             audit = migrate_project(root)
-            resolved, new_hash = load_resolved_project(root)
+            resolved, _ = load_resolved_project(root)
             migrated = load_state(root)
             self.assertEqual(resolved["schema_version"], 2)
             self.assertEqual(migrated["schema_version"], 2)
             self.assertEqual(migrated["units"]["unit-0001"]["status"], "completed")
-            self.assertEqual(migrated["units"]["unit-0001"]["dependency_hashes"]["config"], new_hash)
+            self.assertEqual(
+                migrated["units"]["unit-0001"]["dependency_hashes"]["config"], translation_config_hash(resolved)
+            )
             self.assertEqual(audit["work_units_invalidated"], 0)
             self.assertEqual(migrated["stages"]["qa"]["status"], "invalidated")
 
@@ -117,6 +119,11 @@ class V1ContractTests(unittest.TestCase):
             template = create_review_template(root)
             template["reviewer"] = "tester"
             review_input = root / "qa" / "review-input.json"
+            atomic_write_json(review_input, template)
+            with self.assertRaisesRegex(BTPError, "pending checks: cover, toc"):
+                record_publication_review(root, review_input)
+            for check in template["checks"]:
+                check["status"] = "approved"
             atomic_write_json(review_input, template)
             record_publication_review(root, review_input)
             state = load_state(root)

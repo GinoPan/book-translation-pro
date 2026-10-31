@@ -72,6 +72,12 @@ def save_glossary(project: Path, value: dict[str, Any]) -> None:
 def _surface_pattern(surface: str) -> re.Pattern[str]:
     escaped = re.escape(surface)
     if surface.isascii() and any(char.isalnum() for char in surface):
+        # Match regular English inflections of the final word so "neural
+        # networks" and "strategies" still select "neural network"/"strategy".
+        if re.search(r"[^aeiou]y$", surface, re.IGNORECASE):
+            escaped = re.escape(surface[:-1]) + r"(?:y|ies|y['’]s)"
+        elif surface[-1].isalpha():
+            escaped += r"(?:s|es|['’]s)?"
         return re.compile(rf"(?<!\w){escaped}(?!\w)", re.IGNORECASE)
     return re.compile(escaped)
 

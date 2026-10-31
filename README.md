@@ -63,7 +63,20 @@ btp runtime-conformance
 btp doctor --mode study
 ```
 
-PDF 视觉处理依赖 PyMuPDF 和 Pillow，均会随 Python 包安装。扫描页 OCR 需要 Tesseract；CHM 输入需要 7-Zip 或 Windows `hh.exe`；PDF 导出需要 Microsoft Word 或 LibreOffice；Publication 模式的 EPUB 还需要 EPUBCheck。`btp doctor` 会报告当前环境具备的能力。
+外部工具：
+
+| 用途 | 需要的工具 |
+|---|---|
+| DOCX / EPUB 输入 | **Calibre**（`ebook-convert`）和 **Pandoc**，必需 |
+| CHM 输入 | Pandoc，以及 7-Zip 或 Windows `hh.exe` |
+| PDF 输入 | 优先用 Calibre + Pandoc，再按 PDF 字号恢复标题；工具缺失或 Calibre 转换失败时自动改用 PyMuPDF 直接提取，并在 `analysis/book-profile.json` 中记录警告 |
+| 扫描页 OCR | Tesseract |
+| PDF 导出 | Microsoft Word 或 LibreOffice |
+| Publication 模式的 EPUB | EPUBCheck |
+
+PyMuPDF 和 Pillow 会随 Python 包安装。`btp doctor` 会报告当前环境具备的能力。
+
+**语言范围：** 翻译、断点续作和完整性检查适用于任意语言对；但默认字体、脚注标记修复、日期检查和图表标题识别是按中文译文调校的，目前只在英译中上验证过。目标语言不是中文时，`btp init` 会给出提示。
 
 ## 作为 Codex Skill 使用
 
@@ -104,7 +117,7 @@ btp plan D:/Books/source-zh
 btp status D:/Books/source-zh
 ```
 
-`prepare` 会提取内容、建立结构与状态；语言代理随后根据 `plan` 生成的工作队列编写 Context Capsules、翻译和编辑结果，并用 `record` 写入经过校验的状态。完成语义工作后运行：
+`prepare` 会提取内容、建立结构与状态；语言代理随后根据 `plan` 生成的工作队列编写 Context Capsules、翻译和编辑结果，并用 `record` 写入经过校验的状态。每个单元必须先用 `show-unit <项目> <单元> --phase translate` 领取工作包、按工作包翻译，再 `record --kind draft`；如果领取之后术语表、风格指南、上一单元的 Capsule 或配置发生了变化，`record` 会拒绝这份译稿。多个 worker 可以并行 `record`，状态写入由项目锁串行化。完成语义工作后运行：
 
 ```bash
 btp qa D:/Books/source-zh
@@ -114,6 +127,10 @@ btp status D:/Books/source-zh
 ```
 
 `typeset` 只生成供检查的排版候选，不会绕过 QA 或把项目标记为完成。Publication 模式还需要完成出版复核、例外记录和最终签核。
+
+`qa` 会阻断以下情况：译文段落少于原文（漏译）、译文长度不足原文一半（截断）、一半以上内容与原文逐字相同（未翻译）、数字或年份被改动、单元的依赖（原文、术语、风格指南、Capsule、配置）在翻译后已变化。确属有意的差异，在该单元的 observation 的 `source_issues` 中写明 `structure_reflowed: <原因>` 或 `untranslated_by_design: <原因>`（例如参考文献保留原文）。
+
+修改 `book-project.yaml` 后运行 `btp prepare`：只影响输出或排版的改动会直接生效，不重新提取；改动原文、分块或视觉设置时需要 `prepare --rebuild`。重建会保留已有译文、编辑稿、原文未变单元的 Capsule 和审核记录，`plan` 只重排原文实际变化的单元；已不存在的单元文件会移到 `target/orphaned/`。
 
 查看所有命令：
 
@@ -167,6 +184,8 @@ cd book-translation-pro
 python -m pip install -e .
 python -m pytest -q
 ```
+
+`pyproject.toml` 已把 `scripts/` 加入 pytest 路径，测试总是针对当前检出的代码，而不是 pip 安装的副本。真实格式的端到端测试需要显式开启：`BTP_RUN_E2E=1 python -m pytest -q tests/integration`。
 
 项目的确定性引擎位于 `scripts/book_translation_pro/`，JSON Schema 位于 `references/schemas/`，自动化测试位于 `tests/`。
 

@@ -6,8 +6,10 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import jsonschema
+
 from . import __version__
-from .artifacts import schema_path
+from .artifacts import BTPError, load_json, schema_path
 from .runtime import doctor_report
 from .runtime_adapters import conformance_cases
 
@@ -27,6 +29,30 @@ REQUIRED_SCHEMAS = (
 )
 
 
+def _schemas_valid() -> bool:
+    """Every shipped schema is itself a valid Draft 2020-12 schema."""
+    try:
+        for name in REQUIRED_SCHEMAS:
+            jsonschema.Draft202012Validator.check_schema(load_json(schema_path(name)))
+    except (BTPError, jsonschema.SchemaError):
+        return False
+    return True
+
+
+def _template_resolves() -> bool:
+    """The shipped project template resolves and validates in every mode."""
+    from .config import MODE_DEFAULTS, load_yaml, resolve_config
+    from .project import _skill_root
+
+    try:
+        raw = load_yaml(_skill_root() / "assets" / "project-template" / "book-project.yaml")
+        for mode in MODE_DEFAULTS:
+            resolve_config(raw, {"mode": mode})
+    except BTPError:
+        return False
+    return True
+
+
 def release_check() -> dict[str, Any]:
     source_root = Path(__file__).resolve().parents[2]
     pyproject = source_root / "pyproject.toml"
@@ -36,6 +62,8 @@ def release_check() -> dict[str, Any]:
     checks = {
         "version_consistent": project_version == __version__,
         "schemas_available": all(schema_path(name).is_file() for name in REQUIRED_SCHEMAS),
+        "schemas_valid": _schemas_valid(),
+        "project_template_resolves": _template_resolves(),
         "runtime_contracts": conformance_cases()["passed"],
     }
     host = doctor_report("publication")

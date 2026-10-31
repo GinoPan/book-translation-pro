@@ -18,7 +18,7 @@ from book_translation_pro.manifest import load_manifest
 from book_translation_pro.project import initialize_project, prepare_project
 from book_translation_pro.qa import run_qa
 from book_translation_pro.runtime import doctor_report, find_binary
-from book_translation_pro.state import plan_run, record_review, record_text_output
+from book_translation_pro.state import dispatch_unit, plan_run, record_review, record_text_output
 from book_translation_pro.visual import record_visual_review
 
 
@@ -136,11 +136,13 @@ def complete_fake_semantic_work(project: Path) -> None:
         atomic_write_json(capsule_path, capsule)
         atomic_write_json(safe_project_path(project, entry["observation_file"]), {
             "schema_version": 1, "new_entries": [], "conflicts": [],
-            "source_issues": [], "used_glossary_ids": [],
+            # Identity "translation" exercises pipeline mechanics only.
+            "source_issues": ["untranslated_by_design: identity fixture"], "used_glossary_ids": [],
         })
         source = safe_project_path(project, entry["source_file"])
         draft = safe_project_path(project, entry["draft_file"])
         atomic_write_text(draft, source.read_text(encoding="utf-8"))
+        dispatch_unit(project, unit_id)
         record_text_output(project, unit_id, "draft")
         edited = safe_project_path(project, entry["edit_file"])
         atomic_write_text(edited, draft.read_text(encoding="utf-8"))

@@ -12,6 +12,7 @@ from book_translation_pro.glossary import empty_glossary, save_glossary
 from book_translation_pro.manifest import create_manifest
 from book_translation_pro.qa import _number_tokens, _urls, run_qa
 from book_translation_pro.state import (
+    dispatch_unit,
     initialize_state,
     load_state,
     plan_run,
@@ -131,6 +132,7 @@ class StateTests(unittest.TestCase):
             save_state(root, state)
             valid = "# Bearing 1\n\nbearing preload is 10 mm.\n"
             atomic_write_text(root / "target" / "draft" / "unit-0001.md", valid)
+            dispatch_unit(root, "unit-0001")
             record_text_output(root, "unit-0001", "draft")
             atomic_write_text(root / "target" / "edited" / "unit-0001.md", valid)
             record_text_output(root, "unit-0001", "edit")
@@ -145,6 +147,7 @@ class StateTests(unittest.TestCase):
             self.assertIn("checkpoint_pending:terminology", first["blocked"])
             record_review(root, "terminology", True, "tester", "approved")
             atomic_write_text(root / "target" / "draft" / "unit-0001.md", "# 轴承\n\n轴承预紧为 10 mm。\n")
+            dispatch_unit(root, "unit-0001")
             record_text_output(root, "unit-0001", "draft")
             atomic_write_text(root / "target" / "edited" / "unit-0001.md", "# 轴承\n\n轴承预紧为 10 mm。\n")
             record_text_output(root, "unit-0001", "edit")
@@ -170,6 +173,7 @@ class StateTests(unittest.TestCase):
             config, _ = make_project(root)
             record_review(root, "terminology", True, "tester", "approved")
             atomic_write_text(root / "target" / "draft" / "unit-0001.md", "# 轴承\n\n数值为 11 mm。\n")
+            dispatch_unit(root, "unit-0001")
             record_text_output(root, "unit-0001", "draft")
             atomic_write_text(root / "target" / "edited" / "unit-0001.md", "# 轴承\n\n数值为 11 mm。\n")
             record_text_output(root, "unit-0001", "edit")
@@ -214,6 +218,7 @@ class StateTests(unittest.TestCase):
             atomic_write_json(root / "state" / "manifest.json", manifest)
             record_review(root, "terminology", True, "tester", "approved")
             atomic_write_text(root / "target" / "draft" / "unit-0001.md", target)
+            dispatch_unit(root, "unit-0001")
             record_text_output(root, "unit-0001", "draft")
             atomic_write_text(root / "target" / "edited" / "unit-0001.md", target)
             record_text_output(root, "unit-0001", "edit")
@@ -226,6 +231,7 @@ class StateTests(unittest.TestCase):
             _, _ = make_project(root, unit_count=2)
             record_review(root, "terminology", True, "tester", "approved")
             atomic_write_text(root / "target" / "draft" / "unit-0001.md", "# Bearing 1\n\nbearing preload is 10 mm.\n")
+            dispatch_unit(root, "unit-0001")
             record_text_output(root, "unit-0001", "draft")
             queue = plan_run(root, False, 2)
             self.assertIn("unit-0001", queue["unchanged_unit_ids"])
@@ -237,6 +243,7 @@ class StateTests(unittest.TestCase):
             _, _ = make_project(root)
             record_review(root, "terminology", True, "tester", "approved")
             atomic_write_text(root / "target" / "draft" / "unit-0001.md", "# Bearing 1\n\nbearing preload is 10 mm.\n")
+            dispatch_unit(root, "unit-0001")
             record_text_output(root, "unit-0001", "draft")
             atomic_write_text(root / "source-work" / "work-units" / "unit-0001.md", "changed source\n")
             queue = plan_run(root, False, 2)
@@ -250,6 +257,7 @@ class StateTests(unittest.TestCase):
             record_review(root, "terminology", True, "tester", "approved")
             valid = "# Bearing 1\n\nbearing preload is 10 mm.\n"
             atomic_write_text(root / "target" / "draft" / "unit-0001.md", valid)
+            dispatch_unit(root, "unit-0001")
             record_text_output(root, "unit-0001", "draft")
             atomic_write_text(root / "target" / "edited" / "unit-0001.md", valid)
             record_text_output(root, "unit-0001", "edit")
@@ -264,6 +272,7 @@ class StateTests(unittest.TestCase):
             record_review(root, "terminology", True, "tester", "approved")
             valid = "# Bearing 1\n\nbearing preload is 10 mm.\n"
             atomic_write_text(root / "target" / "draft" / "unit-0001.md", valid)
+            dispatch_unit(root, "unit-0001")
             record_text_output(root, "unit-0001", "draft")
             atomic_write_text(root / "target" / "edited" / "unit-0001.md", valid)
             record_text_output(root, "unit-0001", "edit")
@@ -278,6 +287,7 @@ class StateTests(unittest.TestCase):
             record_review(root, "terminology", True, "tester", "approved")
             valid = "# Bearing 1\n\nbearing preload is 10 mm.\n"
             atomic_write_text(root / "target" / "draft" / "unit-0001.md", valid)
+            dispatch_unit(root, "unit-0001")
             record_text_output(root, "unit-0001", "draft")
             atomic_write_text(root / "target" / "edited" / "unit-0001.md", valid)
             record_text_output(root, "unit-0001", "edit")

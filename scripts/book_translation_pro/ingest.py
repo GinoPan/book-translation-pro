@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .artifacts import BTPError, atomic_write_text, portable_path, safe_project_path
+from .pdf_text import extract_markdown, heading_lines, promote_headings
 from .runtime import find_binary
 
 
@@ -249,7 +250,78 @@ def _combine_chm_topics(root: Path, destination: Path) -> tuple[Path, Path | Non
     return destination, toc_path, len(topics)
 
 
+_WRAPPER_DIV_RE = re.compile(r"^\s*(?:<div\b(?P<attrs>[^>]*)>|</div\s*>)\s*$", re.IGNORECASE)
+_DIV_ID_RE = re.compile(r"""\bid\s*=\s*["'](?P<id>[^"']+)["']""", re.IGNORECASE)
+_LOCAL_TARGET_RE = re.compile(r"""(?:\]\(|\bhref\s*=\s*["'])#(?P<id>[^)\s"']+)""", re.IGNORECASE)
+
+
+def strip_wrapper_divs(markdown: str) -> tuple[str, int]:
+    """Remove Calibre/Pandoc layout ``<div>`` wrapper lines from the working draft.
+
+    Wrapper lines carry no text, yet they otherwise become work units of their
+    own and invite a translator to mangle unbalanced markup.  A wrapper whose
+    ``id`` is a link target is kept as an empty anchor so the link survives.
+    """
+    referenced = {match.group("id") for match in _LOCAL_TARGET_RE.finditer(markdown)}
+    lines: list[str] = []
+    removed = 0
+    in_fence = False
+    for line in markdown.split("\n"):
+        if line.lstrip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+        match = None if in_fence else _WRAPPER_DIV_RE.match(line)
+        if not match:
+            lines.append(line)
+            continue
+        removed += 1
+        div_id = _DIV_ID_RE.search(match.group("attrs") or "")
+        if div_id and div_id.group("id") in referenced:
+            lines.append(f'<a id="{div_id.group("id")}"></a>')
+    return "\n".join(lines), removed
+
+
+def _convert_pdf_with_pymupdf(project: Path, source: Path, reason: str) -> tuple[Path, dict[str, Any]]:
+    markdown = safe_project_path(project, "source-work/extracted/input.md")
+    image_dir = safe_project_path(project, "assets/original/pdf")
+    text, stats = extract_markdown(source, project, image_dir)
+    if not text.strip():
+        raise BTPError(f"PyMuPDF fallback extracted no text ({reason})")
+    atomic_write_text(markdown, text)
+    return markdown, {
+        "format": "pdf",
+        "source": portable_path(source, project),
+        "markdown": portable_path(markdown, project),
+        "extractor": "pymupdf",
+        "fallback_reason": reason,
+        **stats,
+    }
+
+
 def convert_to_markdown(project: Path, config: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    """Convert the source to the Markdown working draft.
+
+    PDFs use Calibre/Pandoc and then recover headings from the PDF font sizes;
+    when those tools are missing or Calibre cannot reflow the file, the PDF is
+    extracted directly with PyMuPDF and the reason is recorded.
+    """
+    source = safe_project_path(project, config["source"]["path"])
+    fmt = source_format(source, config["source"].get("format", "auto"))
+    if fmt != "pdf" or not source.is_file():
+        return _convert_with_tools(project, config)
+    missing = [name for name in ("ebook-convert", "pandoc") if not find_binary(name)]
+    if missing:
+        return _convert_pdf_with_pymupdf(project, source, f"missing conversion tools: {', '.join(missing)}")
+    try:
+        markdown, conversion = _convert_with_tools(project, config)
+    except BTPError as exc:
+        return _convert_pdf_with_pymupdf(project, source, f"Calibre/Pandoc conversion failed: {exc}")
+    text, promoted = promote_headings(markdown.read_text(encoding="utf-8"), heading_lines(source))
+    atomic_write_text(markdown, text)
+    conversion["pdf_headings_promoted"] = promoted
+    return markdown, conversion
+
+
+def _convert_with_tools(project: Path, config: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
     source = safe_project_path(project, config["source"]["path"])
     if not source.is_file():
         raise BTPError(f"Configured source file is missing: {config['source']['path']}")
@@ -328,6 +400,7 @@ def convert_to_markdown(project: Path, config: dict[str, Any]) -> tuple[Path, di
         roots.update({plain, plain.replace("\\", "/")})
     for root in sorted(roots, key=len, reverse=True):
         converted = converted.replace(root + "\\", "").replace(root + "/", "")
+    converted, wrapper_lines_removed = strip_wrapper_divs(converted)
     atomic_write_text(markdown, converted)
     if not markdown.is_file() or not markdown.read_text(encoding="utf-8").strip():
         raise BTPError("Source conversion produced an empty Markdown working draft")
@@ -342,4 +415,5 @@ def convert_to_markdown(project: Path, config: dict[str, Any]) -> tuple[Path, di
         "topic_count": topic_count,
         "toc": portable_path(toc_path, project) if toc_path else None,
         "image_link_promotions": promoted_images,
+        "wrapper_div_lines_removed": wrapper_lines_removed,
     }

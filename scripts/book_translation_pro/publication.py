@@ -1627,6 +1627,14 @@ def clean_markdown_for_publication(markdown: str) -> str:
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    # Calibre copies EPUB navigation roles (type="toc") onto links; XHTML
+    # requires a MIME type there, so EPUBCheck rejects them.
+    text = re.sub(
+        r'(<a\b[^>]*?)\s+type=["\'][^"\'/]*["\']',
+        r"\1",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
     return text
 

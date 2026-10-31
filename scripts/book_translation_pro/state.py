@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from .artifacts import (
     BTPError,
@@ -13,13 +14,28 @@ from .artifacts import (
     ensure_nonblank,
     hash_data,
     load_json,
+    project_lock,
     safe_project_path,
     sha256_file,
     validate_schema,
 )
-from .config import load_resolved_project
+from .config import config_drifted, load_resolved_project, translation_config_hash
 from .glossary import load_effective_glossary, selected_hashes
 from .manifest import load_manifest, validate_manifest_sources
+
+
+T = TypeVar("T")
+
+
+def _locked(function: Callable[..., T]) -> Callable[..., T]:
+    """Run a Run State read-modify-write under the project lock (project is the first argument)."""
+
+    @functools.wraps(function)
+    def wrapper(project: Path, *args: Any, **kwargs: Any) -> T:
+        with project_lock(project):
+            return function(project, *args, **kwargs)
+
+    return wrapper
 
 
 def now_utc() -> str:
@@ -127,7 +143,7 @@ def _review_pending(state: dict[str, Any], checkpoint: str) -> bool:
 def _current_dependencies(
     project: Path,
     entry: dict[str, Any],
-    manifest: dict[str, Any],
+    config: dict[str, Any],
     glossary: dict[str, Any],
     previous_entry: dict[str, Any] | None,
 ) -> dict[str, str]:
@@ -143,7 +159,7 @@ def _current_dependencies(
     term_hashes = selected_hashes(glossary, source_text, entry["book_node_id"])
     dependencies = {
         "source": sha256_file(source),
-        "config": manifest["resolved_config_hash"],
+        "config": translation_config_hash(config),
         "book_node": hash_data(node),
         "style_guide": sha256_file(project / "config" / "style-guide.md"),
         "incoming_capsule": incoming_capsule_hash,
@@ -156,6 +172,85 @@ def _current_dependencies(
     return dependencies
 
 
+def unit_dependencies(
+    project: Path,
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+    glossary: dict[str, Any],
+    unit_id: str,
+) -> dict[str, str]:
+    """Current dependency hashes for one unit, including its incoming capsule."""
+    ordered = sorted(manifest["units"], key=lambda item: item["order"])
+    index = next((i for i, item in enumerate(ordered) if item["unit_id"] == unit_id), None)
+    if index is None:
+        raise BTPError(f"Unknown work unit: {unit_id}")
+    previous = ordered[index - 1] if index else None
+    return _current_dependencies(project, ordered[index], config, glossary, previous)
+
+
+def recorded_dependencies(record: dict[str, Any], manifest: dict[str, Any], config: dict[str, Any]) -> dict[str, str]:
+    """Return a unit record's dependency hashes in the current comparison format.
+
+    Records written before the configuration hash was narrowed to
+    translation-relevant settings stored the whole prepared-config hash.  Such a
+    record matches the prepared configuration, which `plan` and `qa` separately
+    require to be the current one, so it maps to the current translation hash.
+    """
+    dependencies = dict(record.get("dependency_hashes", {}))
+    if dependencies.get("config") == manifest["resolved_config_hash"]:
+        dependencies["config"] = translation_config_hash(config)
+    return dependencies
+
+
+def _dispatch_path(project: Path, unit_id: str) -> Path:
+    return safe_project_path(project, f"state/dispatch/{unit_id}.json")
+
+
+def dispatch_unit(project: Path, unit_id: str) -> dict[str, str]:
+    """Snapshot the inputs a translation package was built from.
+
+    ``record --kind draft`` compares this snapshot with the dependencies at
+    recording time, so a draft written against an older Glossary, Style Guide,
+    capsule, or source can never be stored as current.
+    """
+    manifest = load_manifest(project)
+    config, _ = load_resolved_project(project)
+    glossary = load_effective_glossary(project, config)
+    dependencies = unit_dependencies(project, manifest, config, glossary, unit_id)
+    atomic_write_json(_dispatch_path(project, unit_id), {
+        "schema_version": 1,
+        "unit_id": unit_id,
+        "dependency_hashes": dependencies,
+        "dispatched_at": now_utc(),
+    })
+    return dependencies
+
+
+def _verify_dispatch(
+    project: Path,
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+    glossary: dict[str, Any],
+    unit_id: str,
+) -> dict[str, str]:
+    path = _dispatch_path(project, unit_id)
+    if not path.is_file():
+        raise BTPError(
+            f"No translation package was issued for {unit_id}; run "
+            f"`show-unit <project> {unit_id} --phase translate`, translate from that package, then record"
+        )
+    dispatched = load_json(path).get("dependency_hashes", {})
+    current = unit_dependencies(project, manifest, config, glossary, unit_id)
+    changed = sorted(key for key in set(current) | set(dispatched) if current.get(key) != dispatched.get(key))
+    if changed:
+        raise BTPError(
+            f"Inputs for {unit_id} changed after its translation package was issued "
+            f"({', '.join(changed)}); rerun show-unit and retranslate before recording"
+        )
+    return current
+
+
+@_locked
 def plan_run(project: Path, require_edit: bool, max_attempts: int) -> dict[str, Any]:
     manifest = load_manifest(project)
     state = load_state(project)
@@ -171,6 +266,8 @@ def plan_run(project: Path, require_edit: bool, max_attempts: int) -> dict[str, 
         blocked.append("source_fingerprint_changed")
     if state["resolved_config_hash"] != manifest["resolved_config_hash"]:
         blocked.append("resolved_config_changed_since_prepare")
+    if config_drifted(project, manifest["resolved_config_hash"]):
+        blocked.append("book_project_yaml_changed:run_prepare")
 
     translation: list[str] = []
     record_only: list[str] = []
@@ -189,7 +286,8 @@ def plan_run(project: Path, require_edit: bool, max_attempts: int) -> dict[str, 
             capsules.append(unit_id)
         draft = safe_project_path(project, entry["draft_file"])
         reasons: list[str] = []
-        dependencies = _current_dependencies(project, entry, manifest, glossary, previous)
+        dependencies = _current_dependencies(project, entry, config, glossary, previous)
+        recorded = recorded_dependencies(record, manifest, config)
         if record["attempts"] >= max_attempts and record["status"] in {"failed_retryable", "failed_terminal"}:
             reasons.append("attempt_limit_reached")
             blocked.append(f"attempt_limit_reached:{unit_id}")
@@ -199,10 +297,15 @@ def plan_run(project: Path, require_edit: bool, max_attempts: int) -> dict[str, 
         elif not record.get("output_hashes", {}).get("draft"):
             reasons.append("existing_unrecorded_draft")
             record_only.append(unit_id)
-        elif record.get("dependency_hashes") != dependencies:
-            changed = sorted(
-                key for key in dependencies if record.get("dependency_hashes", {}).get(key) != dependencies[key]
-            )
+        elif (
+            record["status"] == "skipped_approved"
+            and recorded.get("source") == dependencies["source"]
+            and record["output_hashes"].get("draft") == sha256_file(draft)
+        ):
+            # Markup-only unit carried over verbatim; only its source matters.
+            unchanged.append(unit_id)
+        elif recorded != dependencies:
+            changed = sorted(key for key in dependencies if recorded.get(key) != dependencies[key])
             reasons.extend(f"dependency_changed:{key}" for key in changed)
             translation.append(unit_id)
             record["status"] = "invalidated"
@@ -250,6 +353,7 @@ def _entry_for(manifest: dict[str, Any], unit_id: str) -> dict[str, Any]:
         raise BTPError(f"Unknown work unit: {unit_id}") from exc
 
 
+@_locked
 def record_text_output(
     project: Path,
     unit_id: str,
@@ -264,15 +368,14 @@ def record_text_output(
     entry = _entry_for(manifest, unit_id)
     field = "draft_file" if kind == "draft" else "edit_file"
     destination = safe_project_path(project, entry[field])
+    # Verify before copying so a stale draft never overwrites the current file.
+    dependencies = _verify_dispatch(project, manifest, config, glossary, unit_id) if kind == "draft" else None
     if source and source.resolve() != destination.resolve():
         atomic_copy(source, destination)
     ensure_nonblank(destination)
     record = state["units"].setdefault(unit_id, empty_record())
-    if kind == "draft":
-        ordered = sorted(manifest["units"], key=lambda item: item["order"])
-        index = next(index for index, item in enumerate(ordered) if item["unit_id"] == unit_id)
-        previous = ordered[index - 1] if index else None
-        record["dependency_hashes"] = _current_dependencies(project, entry, manifest, glossary, previous)
+    if dependencies is not None:
+        record["dependency_hashes"] = dependencies
         record["attempts"] += 1
         record["status"] = "completed"
     else:
@@ -298,6 +401,7 @@ def record_text_output(
     return record
 
 
+@_locked
 def record_failure(
     project: Path,
     unit_id: str,
@@ -321,6 +425,7 @@ def record_failure(
     return record
 
 
+@_locked
 def record_review(project: Path, checkpoint: str, approved: bool, reviewer: str, notes: str) -> None:
     state = load_state(project)
     evidence_hashes: dict[str, str] = {}

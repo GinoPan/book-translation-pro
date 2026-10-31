@@ -49,6 +49,8 @@ Ask only when a missing value would materially change the result. Unknown rights
 
 Use the active Python interpreter with `{baseDir}/scripts/btp.py`. Start with `doctor --mode <fast|study|publication>`. Use `release-check` to verify the installed 1.0 contracts and `runtime-conformance` to verify the four portable runtime profiles. Run `migrate <project-dir>` before resuming a schema-v1 project; migration preserves verified unit work and invalidates only the QA/build stages required by the new contract. Use the CLI for project creation, conversion, manifests, state, visual evidence, recording, QA, and builds; the language agent authors page reviews, capsules, translation, terminology decisions, and editing.
 
+Always issue a unit with `show-unit <project-dir> <unit> --phase translate` and translate from that package; `record --kind draft` rejects a draft when no package was issued or its inputs changed afterwards. Workers may record in parallel; the CLI serializes state writes with a project lock. After editing `book-project.yaml`, run `prepare`: changes that do not affect extraction are adopted in place, and `prepare --rebuild` (needed for source, chunking, or visual changes) preserves translations, edits, unchanged capsules, and reviews. When a unit intentionally omits structure or keeps source-language text, record `structure_reflowed: <reason>` or `untranslated_by_design: <reason>` in its observation `source_issues`; otherwise QA blocks omitted paragraphs, truncation, and untranslated text.
+
 For PDFs, `prepare` creates the Page Map automatically. Inspect each required page with `show-page`, finalize its generated `qa/visual-reviews/page-####.json`, and commit it with `record --kind visual-review --input <file>`. Use `visualize` to add or refresh visual evidence for an already prepared project.
 
 For CHM inputs, `prepare` decompiles the HTML Help container with 7-Zip (or Windows `hh.exe`), follows the extracted HHC table of contents, promotes a locally linked full-resolution figure over any thumbnail `<img>`, and records the topic count and promotion count in `analysis/book-profile.json`. CHM topics use the text pipeline; PDF Page Maps and page-level source visual review do not apply, but the generated DOCX/EPUB/PDF still requires the final rendered visual pass.
@@ -69,7 +71,7 @@ For CHM or table-heavy sources, use `check-tables <project-dir>` before a long b
 - Glossary and Style Guide present before parallel translation
 - One source unit maps to exactly one current translation status
 - Resume planner explains every rerun with dependency-based reason codes
-- Completeness QA passes in every mode
+- Completeness QA passes in every mode, including paragraph coverage, length ratio, untranslated-text, and dependency-freshness checks
 - Every PDF page has a rendered image and Page Map entry
 - Required reading-order, OCR, table, formula, and scan risks have finalized visual reviews
 - Source-page figures reduced to OCR labels are either reconstructed from the authoritative rendered page or explicitly recorded as a missing-asset exception; reconstructed figures are checked in every requested output format

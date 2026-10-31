@@ -9,12 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .artifacts import BTPError, atomic_copy, load_json, normalize_path, safe_project_path, validate_schema
+from .artifacts import BTPError, atomic_copy, load_json, normalize_path, project_lock, safe_project_path, validate_schema
 from .build import build_outputs, typeset_preview
 from .config import load_resolved_project
 from .figures import normalize_image_backgrounds, reconstruct_figures
 from .exceptions import record_exceptions
-from .glossary import load_glossary, save_glossary, select_entries, validate_glossary
+from .glossary import load_effective_glossary, save_glossary, select_entries, validate_glossary
 from .manifest import load_manifest
 from .migration import migrate_project
 from .project import initialize_project, prepare_project, visualize_project
@@ -26,6 +26,7 @@ from .release import release_check
 from .runtime import doctor_report
 from .runtime_adapters import conformance_cases
 from .state import (
+    dispatch_unit,
     load_state,
     plan_run,
     record_failure,
@@ -33,6 +34,14 @@ from .state import (
     record_text_output,
 )
 from .visual import record_visual_review, show_page
+
+
+# Every command that reads and rewrites shared project state runs under the
+# project lock so parallel workers cannot overwrite each other's records.
+PROJECT_LOCKED_COMMANDS = frozenset({
+    "prepare", "visualize", "reconstruct-figures", "normalize-images", "plan", "show-unit",
+    "record", "qa", "build", "typeset", "publication-review", "migrate",
+})
 
 
 def _print(value: Any) -> None:
@@ -93,6 +102,38 @@ def _record_json(args: argparse.Namespace) -> dict[str, Any]:
     return {"recorded": args.kind, "unit_id": args.unit, "path": str(destination)}
 
 
+def chapter_context(project: Path, ordered: list[dict[str, Any]], index: int, budget: int) -> list[dict[str, str]]:
+    """Summaries of earlier units in the same top-level Book Map node.
+
+    The incoming capsule only covers the previous unit; this gives the
+    translator the chapter so far, newest first until the character budget
+    is spent, returned in reading order.  It is context, not a dependency:
+    capsule edits invalidate only the following unit.
+    """
+    book_map = load_json(project / "analysis" / "book-map.json")
+    parent = {child: node["id"] for node in book_map["nodes"] for child in node["children"]}
+
+    def root(node_id: str) -> str:
+        while node_id in parent:
+            node_id = parent[node_id]
+        return node_id
+
+    chapter = root(ordered[index]["book_node_id"])
+    context: list[dict[str, str]] = []
+    used = 0
+    for entry in reversed(ordered[:max(0, index - 1)]):
+        if root(entry["book_node_id"]) != chapter:
+            break
+        summary = str(load_json(safe_project_path(project, entry["capsule_file"])).get("summary", "")).strip()
+        if not summary:
+            continue
+        if used + len(summary) > budget:
+            break
+        context.append({"unit_id": entry["unit_id"], "summary": summary})
+        used += len(summary)
+    return list(reversed(context))
+
+
 def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
     config, _ = load_resolved_project(project)
     manifest = load_manifest(project)
@@ -104,7 +145,9 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
     incoming = None
     if index:
         incoming = load_json(safe_project_path(project, ordered[index - 1]["capsule_file"]))
-    glossary = load_glossary(project)
+    # The effective glossary includes reusable libraries, matching what the
+    # dependency hashes and QA check.
+    glossary = load_effective_glossary(project, config)
     selected = select_entries(glossary, source_text, entry["book_node_id"])
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -115,6 +158,9 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
         "source_file": str(source_path),
         "style_guide_file": str(project / "config" / "style-guide.md"),
         "incoming_capsule": incoming,
+        "chapter_context": chapter_context(
+            project, ordered, index, config["context_capsule"]["max_characters"]
+        ),
         "glossary_entries": selected,
         "custom_instructions": config.get("custom_instructions", []),
         "rights": rights_config(config),
@@ -147,6 +193,8 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
         ]
     if phase == "edit":
         payload["draft_file"] = str(safe_project_path(project, entry["draft_file"]))
+    if phase == "translate":
+        payload["dependency_hashes"] = dispatch_unit(project, unit_id)
     return payload
 
 
@@ -386,10 +434,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # JSON output is consumed by agents as UTF-8; a piped stdout on Windows
+    # otherwise uses the locale code page (GBK on Chinese systems).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        result = args.handler(args)
+        if args.command in PROJECT_LOCKED_COMMANDS:
+            with project_lock(_project(args.project)):
+                result = args.handler(args)
+        else:
+            result = args.handler(args)
         _print(result)
         if args.command == "doctor" and not result["requested_mode_ready"]:
             return 2

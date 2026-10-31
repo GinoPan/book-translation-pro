@@ -134,6 +134,39 @@ def resolve_config(raw: dict[str, Any], overrides: dict[str, Any] | None = None)
     return resolved
 
 
+def translation_config_hash(resolved: dict[str, Any]) -> str:
+    """Hash only the settings that change what a translated unit should say.
+
+    Output formats, layout, and review policy are deliberately excluded so that
+    adding a format or changing typography never invalidates translations.
+    """
+    return hash_data({
+        "source_language": resolved["source"].get("language", "auto"),
+        "target": resolved["target"],
+        "custom_instructions": resolved.get("custom_instructions", []),
+    })
+
+
+def extraction_config_hash(resolved: dict[str, Any]) -> str:
+    """Hash the settings that change extraction, segmentation, or page evidence."""
+    return hash_data({
+        "source": resolved["source"],
+        "chunking": resolved["chunking"],
+        "visual": resolved["visual"],
+    })
+
+
+def config_drifted(project: Path, prepared_hash: str) -> bool:
+    """True when book-project.yaml no longer resolves to the prepared configuration."""
+    return hash_data(resolve_config(load_yaml(project / "book-project.yaml"))) != prepared_hash
+
+
+def persist_overrides(project: Path, overrides: dict[str, Any]) -> None:
+    """Write CLI overrides into book-project.yaml so every later command resolves the same config."""
+    path = project / "book-project.yaml"
+    write_yaml(path, deep_merge(load_yaml(path), overrides))
+
+
 def resolve_project(project: Path, overrides: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
     raw = load_yaml(project / "book-project.yaml")
     resolved = resolve_config(raw, overrides)

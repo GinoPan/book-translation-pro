@@ -25,6 +25,7 @@ def create_manifest(
     book_map: dict[str, Any],
     style_hash: str,
     page_map: dict[str, Any] | None = None,
+    extraction_hash: str | None = None,
 ) -> dict[str, Any]:
     entries = []
     for unit in units:
@@ -54,6 +55,8 @@ def create_manifest(
     }
     if page_map is not None:
         manifest["page_map_hash"] = hash_data(page_map)
+    if extraction_hash is not None:
+        manifest["extraction_config_hash"] = extraction_hash
     validate_schema(manifest, "manifest.schema.json")
     atomic_write_json(project / "state" / "manifest.json", manifest)
     return manifest
