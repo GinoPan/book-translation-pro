@@ -15,7 +15,7 @@ from book_translation_pro.artifacts import BTPError, atomic_write_json, atomic_w
 from book_translation_pro.cli import show_unit
 from book_translation_pro.config import load_resolved_project, load_yaml, write_yaml
 from book_translation_pro.glossary import save_glossary, select_entries
-from book_translation_pro.ingest import strip_wrapper_divs
+from book_translation_pro.ingest import simplify_html_tables, strip_wrapper_divs
 from book_translation_pro.pdf_text import extract_markdown, heading_lines, promote_headings
 from book_translation_pro.manifest import load_manifest
 from book_translation_pro.project import initialize_project, prepare_project, visualize_project
@@ -251,6 +251,21 @@ class ExtractionResidue(unittest.TestCase):
         self.assertNotIn("calibre_link-0", cleaned)
         self.assertIn('<a id="calibre_link-7"></a>', cleaned)
         self.assertIn("```html\n<div>\nkept in code\n</div>\n```", cleaned)
+
+    def test_html_tables_keep_structure_spans_and_ids_only(self) -> None:
+        markdown = (
+            '<table class="table_">\n<colgroup>\n<col style="width: 50%" />\n<col style="width: 50%" />\n</colgroup>\n'
+            '<tbody class="calibre1">\n<tr class="calibre2" id="row-1">\n<td class="td_"><p>Year</p></td>\n'
+            '<td colspan="2" class="td_7"><span class="calibre26">1</span></td>\n</tr>\n</tbody>\n</table>\n\n'
+            '```html\n<table class="kept"><tr><td class="x">code</td></tr></table>\n```\n'
+        )
+        simplified, tables = simplify_html_tables(markdown)
+        self.assertEqual(tables, 1)
+        self.assertTrue(simplified.startswith(
+            '<table>\n<tbody>\n<tr id="row-1">\n<td><p>Year</p></td>\n'
+            '<td colspan="2"><span class="calibre26">1</span></td>\n</tr>\n</tbody>\n</table>\n'
+        ))
+        self.assertIn('<table class="kept"><tr><td class="x">code</td></tr></table>', simplified)
 
     def test_markup_only_unit_is_completed_without_a_worker(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

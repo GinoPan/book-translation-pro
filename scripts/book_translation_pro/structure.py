@@ -12,6 +12,12 @@ IMAGE_RE = re.compile(
     r"(?:!\[[^\]]*\]\(|<img\b[^>]*\bsrc\s*=\s*[\"'])([^)\s\"']+)",
     re.IGNORECASE,
 )
+# Pandoc emits tables it cannot express as pipes (merged or multi-paragraph
+# cells) as raw HTML; like pipe tables they must never be split mid-markup.
+HTML_TABLE_RE = re.compile(r"^\s*<table\b[\s\S]*</table>\s*$", re.IGNORECASE)
+# Split points for an over-long segment, best first: paragraph-internal line
+# break, sentence end, then any space.
+SPLIT_MARKS = (("\n",), ("。", "！", "？", ". ", "! ", "? "), ("；", "; ", "，", ", "), (" ",))
 
 
 @dataclass(frozen=True)
@@ -70,7 +76,7 @@ def parse_blocks(markdown: str) -> list[Segment]:
             kind, level, title = "code", None, None
         elif IMAGE_RE.search(text) and len(text.splitlines()) <= 3:
             kind, level, title = "image", None, None
-        elif all("|" in line for line in text.splitlines()) and len(text.splitlines()) >= 2:
+        elif (all("|" in line for line in text.splitlines()) and len(text.splitlines()) >= 2) or HTML_TABLE_RE.match(text):
             kind, level, title = "table", None, None
         elif first.lstrip().startswith(("- ", "* ", "+ ")) or re.match(r"^\s*\d+[.)]\s", first):
             kind, level, title = "list", None, None
@@ -86,16 +92,12 @@ def _split_long_segment(segment: Segment, hard_max: int) -> list[Segment]:
     pieces: list[str] = []
     remaining = segment.text
     while len(remaining) > hard_max:
-        cut = max(
-            remaining.rfind("\n", 0, hard_max),
-            remaining.rfind("。", 0, hard_max),
-            remaining.rfind(". ", 0, hard_max),
-            remaining.rfind(" ", 0, hard_max),
-        )
-        if cut < hard_max // 2:
-            cut = hard_max
-        else:
-            cut += 1
+        cut = hard_max
+        for marks in SPLIT_MARKS:
+            found = max(remaining.rfind(mark, 0, hard_max) + len(mark) for mark in marks)
+            if found >= hard_max // 2:
+                cut = found
+                break
         pieces.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
     if remaining:
