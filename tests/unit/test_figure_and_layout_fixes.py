@@ -285,6 +285,13 @@ class NumberConservationTests(unittest.TestCase):
         stamped = "fewer sunk costs if market ch03_4772.qxd 2/2/07 3:38 PM Page 55 continues"
         self.assertEqual(_number_tokens(stamped), _number_tokens("fewer sunk costs if market continues"))
 
+    def test_single_letter_units_are_upper_case_and_end_the_phrase(self) -> None:
+        # "A" after an exhibit number is an article, not amperes.
+        self.assertEqual(_number_tokens("EXHIBIT 6.7 A Process View"), _number_tokens("图表 6.7 流程视图"))
+        self.assertEqual(_number_tokens("5 a day"), _number_tokens("每天 5 次"))
+        self.assertNotEqual(_number_tokens("a 230V supply"), _number_tokens("230 伏电源"))
+        self.assertNotEqual(_number_tokens("it draws 10 A."), _number_tokens("电流为 10。"))
+
     def test_real_numeric_change_still_detected(self) -> None:
         self.assertNotEqual(_number_tokens("lead time of 10 days"), _number_tokens("lead time of 11 days"))
 

@@ -1624,6 +1624,8 @@ def _lift_chapter_level(lines: list[str]) -> list[str]:
     PDF extraction ranks headings by font size, so a title page set larger
     than the chapter openers leaves every chapter at level 2, while DOCX
     sections and EPUB chapter files are cut at level 1.
+    A lone chapter whose level 2 holds numbered sections ("6.1 ...") is
+    left alone: those sections belong inside the chapter.
     """
     front = {title.casefold() for title in (*FRONT_TITLES, *TOC_TITLES)}
     headings: list[tuple[int, int, str]] = []
@@ -1635,7 +1637,10 @@ def _lift_chapter_level(lines: list[str]) -> list[str]:
         if match:
             headings.append((index, len(match.group(1)), _plain(match.group(2)).casefold()))
     top = [item for item in headings if item[1] == 1 and item[2] not in front]
-    if len(top) != 1 or headings[0] != top[0] or sum(1 for item in headings if item[1] == 2) < 2:
+    second = [text for _index, level, text in headings if level == 2]
+    if len(top) != 1 or headings[0] != top[0] or len(second) < 2:
+        return lines
+    if all(SECTION_RE.match(text) or text in {"注释", "notes"} for text in second):
         return lines
     lifted = list(lines)
     for index, level, _text in headings:
@@ -1850,14 +1855,15 @@ def _is_part_title(text: str) -> bool:
     return bool(PART_RE.match(text) or PART_EN_RE.match(text))
 
 
+def _opens_body(text: str) -> bool:
+    """A part or numbered chapter title: where the body of the book begins."""
+    return _is_part_title(text) or bool(CHAPTER_TITLE_RE.match(text) or CHAPTER_CN_RE.match(text) or CHAPTER_EN_RE.match(text))
+
+
 def _body_headings(document: Any) -> tuple[list[Any], list[Any]]:
     """Split Heading 1 paragraphs into front matter and the body that opens a chapter or part."""
     headings = [paragraph for paragraph in document.paragraphs if paragraph.style.name == "Heading 1"]
-    start = next((
-        index for index, paragraph in enumerate(headings)
-        if _is_part_title(text := paragraph.text.strip())
-        or CHAPTER_TITLE_RE.match(text) or CHAPTER_CN_RE.match(text) or CHAPTER_EN_RE.match(text)
-    ), None)
+    start = next((index for index, paragraph in enumerate(headings) if _opens_body(paragraph.text.strip())), None)
     if start is None:
         # Unnumbered chapters ("The Machine Age"): the body opens at the
         # first heading that is not a front-matter or contents title.
@@ -2018,6 +2024,14 @@ def _format_title_page(document: Any, options: dict[str, Any]) -> None:
         ).startswith("Heading"):
             title_heading = paragraph
             break
+    if title_heading is not None and _opens_body(title_heading.text.strip()) and not any(
+        paragraph.style.name == "Heading 1" and paragraph._p is not title_heading._p and _opens_body(paragraph.text.strip())
+        for paragraph in document.paragraphs
+    ):
+        # A single chapter titled after its own heading has no title page:
+        # the heading opens the chapter and its text follows.  A book titled
+        # "7 Habits ..." still has chapters of its own after the title.
+        title_heading = None
     title_page = []
     if title_heading is not None:
         for paragraph in document.paragraphs:

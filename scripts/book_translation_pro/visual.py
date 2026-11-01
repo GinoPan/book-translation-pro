@@ -141,8 +141,14 @@ def _reading_order(blocks: list[dict[str, Any]], layout: str, page_width: float)
     return sorted(header, key=key) + sorted(left, key=key) + sorted(right, key=key) + sorted(footer, key=key)
 
 
+# Lines pdf_text.clean_pdf took out of the text flow, by kind, and the Page Map
+# role their block takes: furniture is dropped, figure labels went into a
+# rendered figure image, and a sideways caption came back as text.
+REMOVED_ROLES = {"header": "header", "footer": "footer", "page_number": "page_number", "figure_label": "figure", "caption": "caption"}
+
+
 def _furniture_role(block: dict[str, Any], boxes: dict[tuple[float, ...], str]) -> str | None:
-    """Return header/footer/page_number when every line of the block is page furniture."""
+    """Return the role of a block whose every line pdf_text removed (furniture, figure labels, captions)."""
     if block.get("type") != 0:
         return None
     kinds = [
@@ -152,8 +158,11 @@ def _furniture_role(block: dict[str, Any], boxes: dict[tuple[float, ...], str]) 
     ]
     if not kinds or not all(kinds):
         return None
-    if all(kind == "page_number" for kind in kinds):
-        return "page_number"
+    for kind in ("figure_label", "caption", "page_number"):
+        if all(item == kind for item in kinds):
+            return REMOVED_ROLES[kind]
+    if any(kind in {"figure_label", "caption"} for kind in kinds):
+        return "figure"
     return "header" if "header" in kinds else "footer"
 
 
@@ -537,7 +546,7 @@ def prepare_visual(
     layout_record = project / "source-work" / "extracted" / "pdf-layout.json"
     furniture: dict[int, dict[tuple[float, ...], str]] = {}
     for item in load_json(layout_record).get("removed", []) if layout_record.is_file() else []:
-        if item["kind"] in {"header", "footer", "page_number"}:
+        if item["kind"] in REMOVED_ROLES:
             furniture.setdefault(item["page"], {})[tuple(item["bbox"])] = item["kind"]
     unit_segments = {unit["id"]: unit["segment_ids"] for unit in units}
     asset_records: list[dict[str, Any]] = []
@@ -548,7 +557,9 @@ def prepare_visual(
         image_path = page_dir / f"page-{page_number:04d}.png"
         text_blocks = [block for block in blocks if block.get("type") == 0 and _block_text(block)]
         image_blocks = [block for block in blocks if block.get("type") == 1]
-        layout = detect_layout(text_blocks, page_rect.width)
+        # Labels inside a figure, set in columns of boxes, are not columns of text.
+        flow_blocks = [block for block in text_blocks if not _furniture_role(block, furniture.get(page_number, {}))]
+        layout = detect_layout(flow_blocks, page_rect.width)
         image_coverage = min(1.0, sum(
             max(0.0, (block["bbox"][2] - block["bbox"][0]) * (block["bbox"][3] - block["bbox"][1]))
             for block in image_blocks
@@ -563,7 +574,11 @@ def prepare_visual(
         regions: list[dict[str, Any]] = []
         for order, block in enumerate(ordered):
             furniture_role = _furniture_role(block, furniture.get(page_number, {}))
-            if furniture_role:
+            if furniture_role in {"figure", "caption"}:
+                # Inside a figure rendered as an image (its labels), or a
+                # sideways caption restored as text: nothing to review here.
+                role, risk, reasons, disposition = furniture_role, 0, ["figure_rendered_as_image"], "preserve_asset"
+            elif furniture_role:
                 # Removed from the working draft by pdf_text.clean_pdf.
                 role, risk, reasons, disposition = furniture_role, 0, ["page_furniture_removed"], "omit_approved"
             else:

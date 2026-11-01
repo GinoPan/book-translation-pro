@@ -275,6 +275,11 @@ def insert_rights_notice(markdown: str, config: dict[str, Any]) -> str:
             insert_at += 1
             continue
         break
+    if insert_at < len(lines) and not lines[insert_at].lstrip().startswith("#"):
+        # Body text right under the heading: it opens a chapter, not a title
+        # page, so the notice takes its own page in front of it.
+        prefix = "\n".join(lines[:title_index]).rstrip()
+        return (prefix + "\n\n" if prefix else "") + notice + "\n".join(lines[title_index:]).lstrip()
     prefix = "\n".join(lines[:insert_at]).rstrip() + "\n\n"
     suffix = "\n".join(lines[insert_at:]).lstrip()
     return prefix + notice + suffix

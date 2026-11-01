@@ -41,18 +41,30 @@ BOLD_HEADING_SIZE_RATIO = 0.95
 FOOTNOTE_SIZE_RATIO = 0.85
 FOOTNOTE_TOP_FRACTION = 0.5
 REFERENCE_SIZE_RATIO = 0.75
-# A framed region holding more text than this is a boxed sidebar, not a figure.
-FIGURE_MAX_LABEL_CHARS = 200
+# A framed region with two or more prose-like lines (this long, or this long
+# and nearly as wide as the frame) is a boxed sidebar, not a figure.
+PROSE_LINE_CHARS = 60
+PROSE_WIDE_LINE_CHARS = 40
+PROSE_WIDE_LINE_SHARE = 0.7
 FIGURE_DPI = 180
+# Spans closer than this fraction of the type size belong to one word.
+SPAN_JOIN_GAP = 0.15
+# A line at least this share of its block's width was filled and wrapped.
+WRAPPED_LINE_SHARE = 0.85
+LINE_WRAP_PROBE_CHARS = 20
+TABLE_CELL_MAX_CHARS = 200
+# A page whose text is mostly set sideways holds a landscape exhibit.
+ROTATED_PAGE_SHARE = 0.8
+# Rotation that makes a sideways exhibit upright, by the text's direction.
+UPRIGHT_ROTATION = {(0, -1): 90, (0, 1): -90}
 # Pages mostly covered by an image are scans; their figures are left alone.
 SCANNED_IMAGE_COVERAGE = 0.5
 MIN_IMAGE_PIXELS = 32
 PAGE_BREAK_PROBE_CHARS = 40
-PAGE_BREAK_SEARCH_BLOCKS = 6
 # Arabic folios, or a well-formed roman numeral below 200 (front matter); a
 # word spelled with roman letters ("civil", "mix") is not a folio.
 _FOLIO_RE = re.compile(r"^(?:\d{1,4}|(?=[ivxlc])c?(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))$", re.IGNORECASE)
-_MARKUP_RE = re.compile(r"<[^>]+>|[*_`]")
+_MARKUP_RE = re.compile(r"<[^>]+>|[*_`^]")
 # A bare label such as "Chapter 3" or "Part II" is joined with the title that follows it.
 _LABEL_RE = re.compile(
     r"^(?:(?:chapter|part|book|section|appendix|lecture|lesson)\s+[\w.]+|第\s*[\d一二三四五六七八九十百]+\s*[章节部篇]|[\divxlc.]+)$",
@@ -76,7 +88,11 @@ _HEADING_LABEL_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 # Tokens survive Calibre and PyMuPDF as plain text; Calibre may wrap one in a span.
-_TOKEN_RE = re.compile(r"(<span\b[^>]*>\s*)?BTP(TB|FN)(\d{4})Z(?(1)\s*</span>)")
+_TOKEN_RE = re.compile(r"(<span\b[^>]*>\s*)?BTP(TB|FN|CP)(\d{4})Z(?(1)\s*</span>)")
+# A word broken across lines with a hyphen: "op-" + "erators".
+_LINE_END_HYPHEN_RE = re.compile(r"([A-Za-z]+)-$")
+_LINE_START_WORD_RE = re.compile(r"^([a-z]+)")
+_HYPHENATED_WORD_RE = re.compile(r"(?<![A-Za-z-])([A-Za-z]+-[A-Za-z]+)(?![A-Za-z-])")
 _EMPTY_BLOCK_RE = re.compile(r"^(?:\s|\xa0|</?div\b[^>]*>|<a id=\"[^\"]*\"></a>)*$")
 
 
@@ -85,7 +101,36 @@ def _normalize(text: str) -> str:
 
 
 def _line_text(line: dict[str, Any]) -> str:
-    return " ".join(span.get("text", "").strip() for span in line.get("spans", []) if span.get("text", "").strip())
+    """A line's text; spans that touch join without a space.
+
+    Small capitals set "ON TARGET" as alternating spans ("O", "N"), and a word
+    split that way must not come out as "O N".
+    """
+    pieces: list[str] = []
+    previous: dict[str, Any] | None = None
+    direction = _line_direction(line)
+    for span in line.get("spans", []):
+        text = span.get("text", "")
+        if not text.strip():
+            continue
+        if previous is not None:
+            gap = _span_gap(previous["bbox"], span["bbox"], direction)
+            if gap is None or gap > SPAN_JOIN_GAP * float(span.get("size", 10) or 10):
+                pieces.append(" ")
+        pieces.append(text)
+        previous = span
+    return " ".join("".join(pieces).split())
+
+
+def _span_gap(first: Any, second: Any, direction: tuple[int, int]) -> float | None:
+    """Distance between consecutive spans along the reading direction, if known."""
+    if direction == (1, 0):
+        return float(second[0]) - float(first[2])
+    if direction == (0, -1):
+        return float(first[1]) - float(second[3])
+    if direction == (0, 1):
+        return float(second[1]) - float(first[3])
+    return None
 
 
 def _line_size(line: dict[str, Any]) -> float:
@@ -173,7 +218,7 @@ def _previous_content(blocks: list[str], index: int) -> int | None:
     return None
 
 
-def promote_headings(markdown: str, headings: dict[str, int]) -> tuple[str, int]:
+def promote_headings(markdown: str, headings: dict[str, int], runs: list[list[str]] | None = None) -> tuple[str, int]:
     """Give single-line paragraphs and headings that are PDF heading lines their PDF level.
 
     Calibre's PDF reflow emits most headings as styled paragraphs and guesses
@@ -203,7 +248,24 @@ def promote_headings(markdown: str, headings: dict[str, int]) -> tuple[str, int]
                     promoted += 1
         if fences % 2:
             in_fence = not in_fence
-    return "\n\n".join(block for block in blocks if block != ""), promoted
+    blocks = _merge_heading_runs([block for block in blocks if block != ""], runs or [])
+    return "\n\n".join(blocks), promoted
+
+
+def _merge_heading_runs(blocks: list[str], runs: list[list[str]]) -> list[str]:
+    """Join a heading with the next heading block when the PDF sets them as one two-line title."""
+    pairs = {tuple(run) for run in runs}
+    merged: list[str] = []
+    for block in blocks:
+        current = HEADING_RE.match(block.strip())
+        previous = HEADING_RE.match(merged[-1].strip()) if merged else None
+        if current and previous and len(current.group(1)) == len(previous.group(1)):
+            first, second = _normalize(previous.group(2)), _normalize(current.group(2))
+            if any(first.endswith(head) and second == tail for head, tail in pairs):
+                merged[-1] = f"{previous.group(1)} {previous.group(2).strip()} {current.group(2).strip()}"
+                continue
+        merged.append(block)
+    return merged
 
 
 def _line_center_y(line: dict[str, Any]) -> float:
@@ -349,10 +411,23 @@ def _join_lines(lines: list[str]) -> str:
     return text
 
 
-def _inner(rect: Any) -> Any:
-    """Shrink a text box vertically so a redaction cannot touch neighbouring lines."""
+def _inner(rect: Any, direction: tuple[int, int] = (1, 0), size: float | None = None) -> Any:
+    """Shrink a text box across its lines so a redaction cannot touch neighbouring lines.
+
+    Horizontal text is shrunk top and bottom, vertical text left and right
+    (shrinking along a vertical line would leave its ends behind).  Slanted
+    chart labels only lose a hairline: their neighbours are labels too.
+    """
     fitz = _fitz()
-    return fitz.Rect(rect.x0 + 0.5, rect.y0 + rect.height * 0.25, rect.x1 - 0.5, rect.y1 - rect.height * 0.25)
+    # A quarter of a single line's height, but never more than 0.3 of the type
+    # size: a "line" that stacks a letter over a column of dots is taller.
+    if direction == (1, 0):
+        inset = min(rect.height * 0.25, (size or rect.height) * 0.3)
+        return fitz.Rect(rect.x0 + 0.5, rect.y0 + inset, rect.x1 - 0.5, rect.y1 - inset)
+    if direction in {(0, 1), (0, -1)}:
+        inset = min(rect.width * 0.25, (size or rect.width) * 0.3)
+        return fitz.Rect(rect.x0 + inset, rect.y0 + 0.5, rect.x1 - inset, rect.y1 - 0.5)
+    return rect + (0.5, 0.5, -0.5, -0.5)
 
 
 def _pipe_table(rows: list[list[Any]], header: bool) -> str:
@@ -408,17 +483,98 @@ def _token(kind: str, number: int) -> str:
     return f"BTP{kind}{number:04d}Z"
 
 
+def _line_direction(line: dict[str, Any]) -> tuple[int, int]:
+    return tuple(round(float(value)) for value in line.get("dir", (1, 0)))
+
+
+def _caption_candidate(line: dict[str, Any], body: float) -> bool:
+    """A figure caption is set apart from the body: smaller, or bold.
+
+    A body-size sentence that starts with "Exhibit 6.13." is prose citing the
+    figure and must not claim it.
+    """
+    spans = [span for span in line.get("spans", []) if span.get("text", "").strip()]
+    if not FIGURE_CAPTION_RE.match(_line_text(line)) or _line_size(line) >= body * HEADING_SIZE_RATIO:
+        return False
+    return _line_size(line) < body * BOLD_HEADING_SIZE_RATIO or bool(spans) and all(_is_bold(span) for span in spans)
+
+
+def _prose_like(line: dict[str, Any], crop: Any) -> bool:
+    """A line that reads like running text rather than a figure label."""
+    length = len(_line_text(line))
+    width = float(line["bbox"][2]) - float(line["bbox"][0])
+    return length >= PROSE_LINE_CHARS or (length >= PROSE_WIDE_LINE_CHARS and width >= PROSE_WIDE_LINE_SHARE * crop.width)
+
+
+def _rotated_exhibit(
+    page: Any, rotated: list[tuple[dict[str, Any], dict[str, Any]]], layout: dict[str, Any], record: dict[str, Any], remove: Any
+) -> None:
+    """Turn a sideways exhibit page into one upright image under its caption."""
+    fitz = _fitz()
+    page_number = page.number + 1
+    direction = Counter(_line_direction(line) for _block, line in rotated).most_common(1)[0][0]
+    label = next((line for _block, line in rotated if FIGURE_CAPTION_RE.match(_line_text(line)) or TABLE_CAPTION_RE.match(_line_text(line))), None)
+    caption_lines: list[dict[str, Any]] = []
+    if label is not None:
+        # The title continues along the label's rotated baseline: same x band
+        # for vertical text, read bottom to top for (0, -1).
+        caption_lines = [
+            line for _block, line in rotated
+            if abs(line["bbox"][0] - label["bbox"][0]) < 2 and abs(line["bbox"][2] - label["bbox"][2]) < 2
+        ] if direction in UPRIGHT_ROTATION else [label]
+        caption_lines.sort(key=lambda line: -line["bbox"][3] if direction == (0, -1) else line["bbox"][1])
+    caption_ids = {id(line) for line in caption_lines}
+    crop = None
+    for _block, line in rotated:
+        if id(line) not in caption_ids:
+            crop = fitz.Rect(line["bbox"]) if crop is None else crop | fitz.Rect(line["bbox"])
+    images: list[Any] = []
+    for image in page.get_images(full=True):
+        try:
+            images.extend(page.get_image_rects(image[0]))
+        except (AttributeError, ValueError):
+            continue
+    for rect in images:
+        crop = fitz.Rect(rect) if crop is None else crop | rect
+    if crop is None:
+        return
+    # Table rules and chart strokes belong to the exhibit when they sit on it.
+    for drawing in page.get_drawings():
+        rect = drawing.get("rect")
+        if rect is not None and (crop + (-12, -12, 12, 12)).contains(rect):
+            crop |= rect
+    crop = (crop + (-4, -4, 4, 4)) & page.rect
+    for _block, line in rotated:
+        remove(line, "caption" if id(line) in caption_ids else "figure_label")
+    layout["image_redact"].extend(images)
+    angle = UPRIGHT_ROTATION.get(direction, 0)
+    content = page.rect + (page.rect.width * 0.1, page.rect.height * 0.1, -page.rect.width * 0.1, -page.rect.height * 0.1)
+    upright_width, upright_height = (crop.height, crop.width) if angle else (crop.width, crop.height)
+    width = min(content.width, (content.height - 16) * upright_width / upright_height)
+    target = fitz.Rect(content.x0, content.y0 + 16, content.x0 + width, content.y0 + 16 + width * upright_height / upright_width)
+    layout["rotated"].append((crop, target, angle))
+    caption = _join_lines([_line_text(line) for line in caption_lines]) if caption_lines else ""
+    if caption:
+        number = len(record["captions"]) + 1
+        record["captions"][f"{number:04d}"] = {"page": page_number, "text": caption}
+        layout["tokens"].append((fitz.Point(content.x0, content.y0 + 8), _token("CP", number), 8))
+    record["figures"].append({
+        "page": page_number, "caption": caption, "rotation": angle,
+        "crop_bbox": [round(float(value), 2) for value in crop],
+    })
+
+
 def _page_layout(page: Any, text_blocks: list[dict[str, Any]], profile: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
     """Find furniture, tables, figures, and linked footnotes on one page (read-only)."""
     fitz = _fitz()
     body = profile["body"]
     page_number = page.number + 1
     lines = [(block, line) for block in text_blocks for line in block["lines"] if _line_text(line)]
-    layout: dict[str, Any] = {"redact": [], "image_redact": [], "tables": [], "figures": [], "tokens": []}
+    layout: dict[str, Any] = {"redact": [], "image_redact": [], "tables": [], "figures": [], "rotated": [], "tokens": []}
     removed: set[int] = set()
 
     def remove(line: dict[str, Any], kind: str) -> None:
-        layout["redact"].append(_inner(fitz.Rect(line["bbox"])))
+        layout["redact"].append(_inner(fitz.Rect(line["bbox"]), _line_direction(line), _line_size(line)))
         removed.add(id(line))
         _log_removed(record, page_number, kind, _line_text(line), line["bbox"])
 
@@ -426,6 +582,16 @@ def _page_layout(page: Any, text_blocks: list[dict[str, Any]], profile: dict[str
         kind = _furniture_kind(line, block, page, profile)
         if kind:
             remove(line, kind)
+
+    # A landscape exhibit set sideways (a rotated table or chart) cannot be
+    # reflowed: its lines come out as interleaved fragments.  It becomes one
+    # upright image, and its caption stays text.
+    rotated = [(block, line) for block, line in lines if id(line) not in removed and _line_direction(line) != (1, 0)]
+    remaining = sum(len(_line_text(line)) for _block, line in lines if id(line) not in removed)
+    if rotated and sum(len(_line_text(line)) for _block, line in rotated) >= ROTATED_PAGE_SHARE * remaining:
+        _rotated_exhibit(page, rotated, layout, record, remove)
+        layout.update({"head": None, "tail": None, "rotated_exhibit": True})
+        return layout
 
     try:
         found = page.find_tables().tables
@@ -436,6 +602,10 @@ def _page_layout(page: Any, text_blocks: list[dict[str, Any]], profile: dict[str
     for table in found:
         rows = table.extract()
         if len(rows) < 2 or max(len(row) for row in rows) < 2:
+            continue
+        # A diagram of framed boxes read as a grid yields cells holding whole
+        # passages; a real table's cells are short.
+        if max(len(str(cell or "")) for row in rows for cell in row) > TABLE_CELL_MAX_CHARS:
             continue
         rect = fitz.Rect(table.bbox)
         inside = [line for _block, line in lines if id(line) not in removed and rect.contains(_center(line["bbox"]))]
@@ -470,7 +640,7 @@ def _page_layout(page: Any, text_blocks: list[dict[str, Any]], profile: dict[str
     scanned = any(rect.get_area() >= page_area * SCANNED_IMAGE_COVERAGE for rect in image_rects)
     claimed: list[Any] = list(table_rects)
     for _block, line in lines if not scanned else []:
-        if id(line) in removed or not FIGURE_CAPTION_RE.match(_line_text(line)) or _line_size(line) >= body * HEADING_SIZE_RATIO:
+        if id(line) in removed or not _caption_candidate(line, body):
             continue
         inferred = _figure_crop_box(page, list(line["bbox"]), avoid=claimed)
         if inferred is None:
@@ -478,11 +648,14 @@ def _page_layout(page: Any, text_blocks: list[dict[str, Any]], profile: dict[str
         crop = inferred[0]
         if any(not (crop & other).is_empty and (crop & other).get_area() > 0 for other in claimed):
             continue
+        # The caption's title runs on along its baseline ("EXHIBIT 6.11  GTI
+        # Customer Segments"); it is caption text, not a figure label.
         inside = [
             item for item in lines
             if item[1] is not line and crop.contains(_center(item[1]["bbox"]))
+            and abs(float(item[1]["bbox"][3]) - float(line["bbox"][3])) > 2
         ]
-        if sum(len(_line_text(item[1])) for item in inside) > FIGURE_MAX_LABEL_CHARS:
+        if sum(_prose_like(item[1], crop) for item in inside) >= 2:
             continue
         drawings = [drawing["rect"] for drawing in page.get_drawings() if drawing.get("rect") is not None and crop.intersects(drawing["rect"])]
         if not inside and not drawings:
@@ -514,10 +687,12 @@ def _page_layout(page: Any, text_blocks: list[dict[str, Any]], profile: dict[str
     for _block, line in lines:
         if id(line) in removed or id(line) in note_lines:
             continue
+        before = ""
         for span in line["spans"]:
             marker = span.get("text", "").strip()
             if _MARKER_RE.match(marker) and float(span.get("size", 0)) <= body * REFERENCE_SIZE_RATIO:
-                references.append((marker, fitz.Rect(span["bbox"])))
+                references.append((marker, fitz.Rect(span["bbox"]), bool(int(span.get("flags", 0)) & 1), before))
+            before += span.get("text", "")
     for note in notes:
         reference = next((item for item in references if item[0] == note["marker"]), None)
         if reference is None:
@@ -531,16 +706,148 @@ def _page_layout(page: Any, text_blocks: list[dict[str, Any]], profile: dict[str
         for line in note["lines"]:
             remove(line, "footnote")
         layout["tokens"].append((fitz.Point(reference[1].x0, reference[1].y1 - 1), _token("FN", number), 1))
+    # A set-superscript marker with no note on its page refers to an endnote.
+    # Calibre keeps the digit in place but as a plain digit glued to the word
+    # ("Academy7"); its context lets the draft mark it as a superscript.  A
+    # token inserted into the PDF instead lands wherever Calibre sorts it.
+    for marker, _rect, superscript, before in references:
+        words = before.split()
+        if superscript and words:
+            number = len(record["superscripts"]) + 1
+            record["superscripts"][f"{number:04d}"] = {"page": page_number, "text": marker, "after": words[-1]}
 
+    # Reading order of what is left: removed figure labels in two columns of
+    # boxes would otherwise make a single-column page read as two columns.
+    kept = [block for block in text_blocks if any(_line_text(line) and id(line) not in removed for line in block["lines"])]
     flow = [
         [line for line in block["lines"] if _line_text(line) and id(line) not in removed]
-        for block in _reading_order(text_blocks, detect_layout(text_blocks, page.rect.width), page.rect.width)
+        for block in _reading_order(kept, detect_layout(kept, page.rect.width), page.rect.width)
     ]
     flow = [block for block in flow if block]
     # Whole first/last paragraphs: a last line alone ("ho-") is too short to find reliably.
-    layout["head"] = _join_lines([_line_text(line) for line in flow[0]]) if flow else None
-    layout["tail"] = _join_lines([_line_text(line) for line in flow[-1]]) if flow and not _is_heading_block(flow[-1], body) else None
+    # A figure or table at the top of a page is not where the running text
+    # resumes, nor is a caption title set on the caption's baseline.
+    baselines = [float(block[0]["bbox"][3]) for block in flow if _is_caption_block(block)]
+    text_flow = [block for block in flow if all(abs(float(block[0]["bbox"][3]) - baseline) > 2 for baseline in baselines)]
+    layout["head"] = _join_lines([_line_text(line) for line in text_flow[0]]) if text_flow else None
+    layout["tail"] = (
+        _join_lines([_line_text(line) for line in text_flow[-1]])
+        if text_flow and not _is_heading_block(text_flow[-1], body) else None
+    )
     return layout
+
+
+def _is_caption_block(block: list[dict[str, Any]]) -> bool:
+    first = _line_text(block[0])
+    return bool(FIGURE_CAPTION_RE.match(first) or TABLE_CAPTION_RE.match(first))
+
+
+def _line_wraps(parsed: list[tuple[Any, list[dict[str, Any]]]]) -> list[dict[str, str]]:
+    """Where a paragraph's line was filled and wrapped mid-sentence, as text probes.
+
+    Calibre sometimes ends a paragraph at such a wrap ("... serve and" /
+    "sell them."); the probes let the draft rejoin exactly those places.  A
+    short line (verse, a list, a heading) is never a wrap: it neither fills
+    the block nor reaches prose length.
+    """
+    wraps: list[dict[str, str]] = []
+    for _page, blocks in parsed:
+        previous: dict[str, Any] | None = None
+        for block in blocks:
+            lines = [line for line in block["lines"] if _line_text(line) and _line_direction(line) == (1, 0)]
+            if not lines:
+                continue
+            width = max(float(line["bbox"][2]) - float(line["bbox"][0]) for line in lines)
+            pairs = [(line, following, float(line["bbox"][2]) - float(line["bbox"][0]) >= WRAPPED_LINE_SHARE * width, True)
+                     for line, following in zip(lines, lines[1:])]
+            # A centered paragraph (an epigraph) sets each line as its own
+            # block: the next block continues it when it sits directly below
+            # in the same type.
+            if previous is not None and _same_type_below(previous, lines[0]):
+                pairs.insert(0, (previous, lines[0], True, False))
+            previous = lines[-1]
+            for line, following, filled, same_block in pairs:
+                text, next_text = _line_text(line), _line_text(following)
+                # Within one block a filled line may run on into a capitalized
+                # name ("(New" / "York:"); across blocks only lower case does.
+                runs_on = next_text[:1].islower() or same_block and (next_text[:1].isupper() or next_text[:1].isdigit())
+                # A verse line is short, whether set in the stanza's block or alone.
+                prose = len(text) >= PROSE_WIDE_LINE_CHARS
+                if filled and prose and not _SENTENCE_END_RE.search(text) and runs_on:
+                    wraps.append({
+                        "tail": _normalize(text)[-LINE_WRAP_PROBE_CHARS:],
+                        "head": _normalize(next_text)[:LINE_WRAP_PROBE_CHARS],
+                    })
+    return wraps
+
+
+def _same_type_below(line: dict[str, Any], following: dict[str, Any]) -> bool:
+    """Is ``following`` the next line of the same paragraph, set directly below ``line``?"""
+    size = _line_size(line)
+    gap = float(following["bbox"][1]) - float(line["bbox"][3])
+    italic = {bool(int(span.get("flags", 0)) & 2) for span in line["spans"] + following["spans"] if span.get("text", "").strip()}
+    return abs(_line_size(following) - size) < 0.5 and -1 <= gap <= size * 0.5 and len(italic) == 1
+
+
+def _heading_runs(parsed: list[tuple[Any, list[dict[str, Any]]]], headings: dict[str, int]) -> list[list[str]]:
+    """Pairs of heading lines set directly one under the other: one title over two lines."""
+    runs: list[list[str]] = []
+    for _page, blocks in parsed:
+        lines = [line for block in blocks for line in block["lines"] if _line_text(line)]
+        for line, following in zip(lines, lines[1:]):
+            first, second = _normalize(_line_text(line)), _normalize(_line_text(following))
+            if first in headings and headings.get(second) == headings[first] and _same_type_below(line, following):
+                runs.append([first, second])
+    return runs
+
+
+# A caption run onto a paragraph keeps its own bold; a citation in the
+# sentence ("embedded in Exhibit 6.1. Specifically, ...") is not bold.
+_TRAILING_CAPTION_RE = re.compile(r"\s(\*\*(?:EXHIBIT|FIGURE|FIG\.|TABLE|CHART)\s+[\w.\-]+[^*\n]*\*\*)\s*$", re.IGNORECASE)
+_LEADING_CAPTION_RE = re.compile(r"^\s*(\*\*(?:EXHIBIT|FIGURE|FIG\.|TABLE|CHART)\s+[\w.\-]+[^*\n]*\*\*)\s", re.IGNORECASE)
+
+
+def _split_trailing_captions(blocks: list[str], captions: list[str]) -> list[str]:
+    """Give a figure caption that Calibre ran onto the end of a paragraph its own block.
+
+    A caption at the top of the next page is joined to the last paragraph of
+    this one ("Clearly, EXHIBIT 6.11 GTI Customer Segments"), which also hides
+    the page-break continuation that follows the figure.
+    """
+    known = {_normalize(caption) for caption in captions}
+    result: list[str] = []
+    for block in blocks:
+        match = _TRAILING_CAPTION_RE.search(block)
+        if match and block[:match.start()].strip() and any(_normalize(match.group(1)).startswith(caption) for caption in known):
+            result.extend([block[:match.start()].rstrip(), match.group(1).strip()])
+            continue
+        match = _LEADING_CAPTION_RE.match(block)
+        if match and block[match.end():].strip() and any(_normalize(match.group(1)).startswith(caption) for caption in known):
+            result.extend([match.group(1).strip(), block[match.end():].strip()])
+            continue
+        result.append(block)
+    return result
+
+
+def _rejoin_wrapped_lines(
+    blocks: list[str], wraps: list[dict[str, str]], decisions: dict[str, str] | None = None
+) -> tuple[list[str], int]:
+    """Join adjacent paragraphs that the PDF shows to be one paragraph wrapped across lines."""
+    probes = {(wrap["tail"], wrap["head"]) for wrap in wraps}
+    if not probes:
+        return blocks, 0
+    tails = {tail for tail, _head in probes}
+    joined: list[str] = []
+    count = 0
+    for block in blocks:
+        if joined and not _movable(joined[-1]) and not joined[-1].lstrip().startswith(("#", "|", "<", "!", "[^")):
+            previous_tail = _normalize(joined[-1])[-LINE_WRAP_PROBE_CHARS:]
+            if previous_tail in tails and (previous_tail, _normalize(block)[:LINE_WRAP_PROBE_CHARS]) in probes:
+                joined[-1] = _join_blocks(joined[-1], block, decisions)
+                count += 1
+                continue
+        joined.append(block)
+    return joined, count
 
 
 def _continues(tail: str, head: str) -> bool:
@@ -549,7 +856,8 @@ def _continues(tail: str, head: str) -> bool:
         return False
     if _CJK_RE.match(tail[-1:]):
         return bool(_CJK_RE.match(head[:1]))
-    return head[:1].islower()
+    # "... for 2005 actual expenditures," / "2006 projected expenditures"
+    return head[:1].islower() or head[:1].isdigit()
 
 
 def clean_pdf(source: Path, destination: Path) -> dict[str, Any]:
@@ -559,6 +867,18 @@ def clean_pdf(source: Path, destination: Path) -> dict[str, Any]:
         "schema_version": 1,
         "tables": {},
         "footnotes": {},
+        # Captions of sideways exhibits, restored as text in place of their tokens.
+        "captions": {},
+        # Superscript markers without a note on their page (endnote references).
+        "superscripts": {},
+        # Line-end hyphenation: broken (or Calibre-glued) form -> how it is rejoined.
+        "hyphenation": {},
+        # Text probes of mid-sentence line wraps, to rejoin paragraphs split there.
+        "line_wraps": [],
+        # Heading lines that continue one title on the next line.
+        "heading_runs": [],
+        # Print-production slugs outside the trimmed page (job name, date, page).
+        "print_marks": [],
         "figures": [],
         "page_breaks": [],
         # Every line or marker taken out of the cleaned copy, with its text and box.
@@ -575,20 +895,32 @@ def clean_pdf(source: Path, destination: Path) -> dict[str, Any]:
         has_text = _has_text_layer(parsed)
         profile = _document_profile(parsed) if has_text else {}
         record["headings"] = profile.get("heading_map", {})
+        vocabulary = _vocabulary(parsed) if has_text else (set(), set())
+        record["hyphenation"] = _hyphenation(parsed, vocabulary) if has_text else {}
+        record["line_wraps"] = _line_wraps(parsed) if has_text else []
+        record["heading_runs"] = _heading_runs(parsed, record["headings"]) if has_text else []
         previous_tail: str | None = None
         for page, blocks in parsed if has_text else []:
             original_chars = _chars(page.get_text())
             first_removed = len(record["removed"])
             layout = _page_layout(page, blocks, profile, record)
             if previous_tail and layout["head"] and _continues(previous_tail, layout["head"]):
+                # A word broken across the page break rejoins like any other.
+                record["hyphenation"].update(_hyphen_decisions(previous_tail, layout["head"], vocabulary))
                 record["page_breaks"].append({
                     "page": page.number + 1,
                     "tail": _normalize(previous_tail)[-PAGE_BREAK_PROBE_CHARS:],
                     "head": _normalize(layout["head"])[:PAGE_BREAK_PROBE_CHARS],
                 })
-            previous_tail = layout["tail"]
+            if not layout.get("rotated_exhibit"):
+                # Text runs on past a sideways exhibit page to the next text page.
+                previous_tail = layout["tail"]
             scale = FIGURE_DPI / 72
             renders = [(crop, page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=crop, alpha=False)) for crop in layout["figures"]]
+            renders += [
+                (target, page.get_pixmap(matrix=fitz.Matrix(scale, scale).prerotate(angle), clip=crop, alpha=False))
+                for crop, target, angle in layout["rotated"]
+            ]
             if layout["image_redact"]:
                 for rect in layout["image_redact"]:
                     page.add_redact_annot(rect)
@@ -597,6 +929,7 @@ def clean_pdf(source: Path, destination: Path) -> dict[str, Any]:
                 for rect in layout["redact"]:
                     page.add_redact_annot(rect)
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE)
+            _remove_print_marks(page, record)
             for point, token, size in layout["tokens"]:
                 page.insert_text(point, token, fontsize=size)
             for crop, pixmap in renders:
@@ -614,6 +947,7 @@ def clean_pdf(source: Path, destination: Path) -> dict[str, Any]:
                     document.insert_pdf(original, from_page=index, to_page=index, start_at=index)
                     document.delete_page(index + 1)
                     _forget_page(record, index + 1)
+                    _remove_print_marks(document[index], record)
                     record["warnings"].append(
                         f"Layout cleaning was undone on page {index + 1}: the text removed from it "
                         f"does not match the removal log ({detail})"
@@ -626,13 +960,81 @@ def clean_pdf(source: Path, destination: Path) -> dict[str, Any]:
         "footnotes_linked": len(record["footnotes"]),
         "figures_rendered": len(record["figures"]),
         "pages_restored_unchanged": len(unbalanced),
+        "print_marks_removed": len(record["print_marks"]),
+        "line_end_hyphens_joined": sum(broken.replace("-", "") == joined for broken, joined in record["hyphenation"].items()),
     })
     return record
 
 
+def _remove_print_marks(page: Any, record: dict[str, Any]) -> None:
+    """Redact text set wholly outside the trimmed page: print-production slugs.
+
+    PyMuPDF clips text to the page box, so layout analysis never sees a job
+    stamp ("ch06.qxd 2/2/07 3:40 PM Page 122") in the slug area; Calibre
+    extracts it into the text flow, where it splits paragraphs.
+    """
+    fitz = _fitz()
+    flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
+    found = False
+    for block in page.get_text("dict", flags=flags, clip=fitz.INFINITE_RECT()).get("blocks", []):
+        for line in block.get("lines", []):
+            if _line_text(line) and not page.rect.intersects(fitz.Rect(line["bbox"])):
+                page.add_redact_annot(fitz.Rect(line["bbox"]))
+                record["print_marks"].append({"page": page.number + 1, "text": _line_text(line)})
+                found = True
+    if found:
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE)
+
+
+def _vocabulary(parsed: list[tuple[Any, list[dict[str, Any]]]]) -> tuple[set[str], set[str]]:
+    """The book's hyphenated compounds printed inside a line, and its plain words."""
+    compounds: set[str] = set()
+    words: set[str] = set()
+    for _page, blocks in parsed:
+        for block in blocks:
+            for line in block["lines"]:
+                text = _line_text(line)
+                compounds.update(word.casefold() for word in _HYPHENATED_WORD_RE.findall(text))
+                words.update(word.casefold() for word in re.findall(r"[A-Za-z]+", text))
+    return compounds, words
+
+
+def _hyphen_decisions(text: str, next_text: str, vocabulary: tuple[set[str], set[str]]) -> dict[str, str]:
+    """How a word broken between ``text`` and ``next_text`` rejoins, decided from the book's usage.
+
+    A compound the book prints with a hyphen inside a line keeps it
+    ("customer-driven"), as does a break before a part that is itself
+    hyphenated ("business-" / "value-add"); any other break is soft and the
+    hyphen goes ("op-" + "erators").  A kept compound also maps its glued
+    form back, repairing Calibre's own dehyphenation ("valueadd").
+    """
+    broken = _LINE_END_HYPHEN_RE.search(text.rstrip())
+    following = re.match(r"^([a-z]+)(-?)", next_text.strip())
+    if not broken or not following:
+        return {}
+    compounds, words = vocabulary
+    left, right = broken.group(1), following.group(1)
+    hyphenated, glued = f"{left}-{right}", f"{left}{right}"
+    keep = bool(following.group(2)) or hyphenated.casefold() in compounds
+    decisions = {hyphenated: hyphenated if keep else glued}
+    if keep and glued.casefold() not in words:
+        decisions[glued] = hyphenated
+    return decisions
+
+
+def _hyphenation(parsed: list[tuple[Any, list[dict[str, Any]]]], vocabulary: tuple[set[str], set[str]]) -> dict[str, str]:
+    """Decisions for every word broken at a line end on a page, within or between blocks."""
+    decisions: dict[str, str] = {}
+    for _page, blocks in parsed:
+        texts = [_line_text(line).strip() for block in blocks for line in block["lines"] if _line_text(line).strip()]
+        for text, next_text in zip(texts, texts[1:]):
+            decisions.update(_hyphen_decisions(text, next_text, vocabulary))
+    return dict(sorted(decisions.items()))
+
+
 def _forget_page(record: dict[str, Any], page_number: int) -> None:
     """Drop the layout entries of a page whose original was put back."""
-    for key in ("tables", "footnotes"):
+    for key in ("tables", "footnotes", "captions", "superscripts"):
         record[key] = {number: item for number, item in record[key].items() if item["page"] != page_number}
     for key in ("figures", "removed"):
         record[key] = [item for item in record[key] if item["page"] != page_number]
@@ -654,25 +1056,91 @@ def _movable(block: str) -> bool:
     )
 
 
-def _join_blocks(first: str, second: str) -> str:
+def _join_blocks(first: str, second: str, decisions: dict[str, str] | None = None) -> str:
+    """Join two halves of one paragraph; a word broken at the seam follows the hyphenation decisions.
+
+    Without a decision the hyphen is a soft break and goes.  An emphasis run
+    that closed before the seam and reopens after it ("de-*" / "*fined") is
+    one run, so the pair of markers goes too.
+    """
     first, second = first.rstrip(), second.strip()
     plain_first, plain_second = _normalize(first), _normalize(second)
-    if re.search(r"[^\W\d_]-$", first) and plain_second[:1].islower():
-        return first[:-1] + second
+    broken = re.search(r"([^\W\d_]+)-([*_]*)$", first)
+    lead = re.match(r"([*_]*)([^\W\d_]+)", second)
+    if broken and lead and lead.group(2)[:1].islower() and broken.group(2) == lead.group(1):
+        left, right = broken.group(1), lead.group(2)
+        joined = (decisions or {}).get(f"{left}-{right}", f"{left}{right}")
+        return first[:broken.start()] + joined + second[lead.end():]
     if _CJK_RE.match(plain_first[-1:]) and _CJK_RE.match(plain_second[:1]):
         return first + second
     return f"{first} {second}"
 
 
+def _mark_superscripts(markdown: str, superscripts: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
+    """Mark each recorded superscript digit, found after its word in reading order, as ``^n^``.
+
+    Calibre often sets the digit in its own emphasis right after an emphasis
+    run closes ("them.* *1*"); that wrapper and the space go, leaving
+    "them.*^1^" rather than a "**" that Markdown reads as bold.  A marker that
+    cannot be found is reported, never guessed.
+    """
+    unplaced: list[str] = []
+    position = 0
+    for _number, item in sorted(superscripts.items()):
+        pattern = re.compile(
+            rf"(?<![A-Za-z]){re.escape(item['after'])}(?P<close>[*_]?)(?P<space>[ 	]*)(?P<open>[*_]?)"
+            rf"{re.escape(item['text'])}(?P<end>[*_]?)(?![\d^])"
+        )
+        match = pattern.search(markdown, position) or pattern.search(markdown)
+        if match is None:
+            unplaced.append(f"superscript {item['text']} (page {item['page']})")
+            continue
+        wrapped = match.group("open") and match.group("open") == match.group("end")
+        if wrapped or not match.group("open"):
+            replacement = f"{match.group('close')}^{item['text']}^" + ("" if wrapped else match.group("end"))
+        else:
+            replacement = f"{match.group('close')}{match.group('space')}{match.group('open')}^{item['text']}^{match.group('end')}"
+        start = match.start("close")
+        markdown = markdown[:start] + replacement + markdown[match.end():]
+        position = start + len(replacement)
+    return markdown, unplaced
+
+
+def _rejoin_hyphenation(markdown: str, decisions: dict[str, str]) -> str:
+    """Apply the line-end hyphenation decisions wherever a broken word survived conversion."""
+    for broken, joined in decisions.items():
+        if broken == joined:
+            continue
+        if "-" not in broken:
+            # A compound Calibre glued when it dehyphenated the line end.
+            markdown = re.sub(rf"(?<![A-Za-z-]){re.escape(broken)}(?![A-Za-z-])", joined, markdown)
+            continue
+        left, right = broken.split("-", 1)
+        # Between the halves: spaces, a single newline, span tags, or an
+        # emphasis run that closes and reopens ("de-* *fined"); the pair goes
+        # with the hyphen.  A paragraph break is left to the paragraph joins,
+        # which also move figures out of the way.
+        markdown = re.sub(
+            rf"(?<![A-Za-z]){re.escape(left)}-(?:[ \t]|\n(?![ \t]*\n)|</span>\s*<span\b[^>]*>|\*[ \t]*\*|_[ \t]*_)*{re.escape(right)}(?![A-Za-z])",
+            joined,
+            markdown,
+        )
+    return markdown
+
+
 def restore_layout_markup(markdown: str, record: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Replace layout tokens with tables and footnotes and rejoin page-split paragraphs."""
-    stats = {"tables_restored": 0, "footnotes_restored": 0, "page_breaks_joined": 0, "missing_tokens": []}
+    stats = {"tables_restored": 0, "footnotes_restored": 0, "page_breaks_joined": 0, "line_wraps_joined": 0, "missing_tokens": []}
     seen: set[tuple[str, str]] = set()
 
     def footnote_ref(match: re.Match[str]) -> str:
         kind, number = match.group(2), match.group(3)
         seen.add((kind, number))
         return f"[^fn{int(number)}]" if kind == "FN" else match.group(0)
+
+    markdown = _rejoin_hyphenation(markdown, record.get("hyphenation", {}))
+    markdown, unplaced = _mark_superscripts(markdown, record.get("superscripts", {}))
+    stats["missing_tokens"].extend(unplaced)
 
     blocks: list[str] = []
     for block in re.sub(r"[ \t]*" + _TOKEN_RE.pattern, footnote_ref, markdown).split("\n\n"):
@@ -688,23 +1156,31 @@ def restore_layout_markup(markdown: str, record: dict[str, Any]) -> tuple[str, d
         for index in range(1, len(pieces), 4):
             kind, number, after = pieces[index + 1], pieces[index + 2], pieces[index + 3]
             table = record["tables"].get(number) if kind == "TB" else None
+            caption = record.get("captions", {}).get(number) if kind == "CP" else None
             if table:
                 seen.add((kind, number))
                 blocks.append(table["markdown"])
                 stats["tables_restored"] += 1
+            elif caption:
+                seen.add((kind, number))
+                blocks.append(caption["text"])
             else:
                 stats["missing_tokens"].append(f"unknown token {kind}{number}")
             blocks.append(after.strip())
     blocks = [block for block in blocks if block.strip()]
+    blocks = _split_trailing_captions(blocks, [figure["caption"] for figure in record.get("figures", []) if figure.get("caption")])
+    blocks, stats["line_wraps_joined"] = _rejoin_wrapped_lines(blocks, record.get("line_wraps", []), record.get("hyphenation", {}))
 
     for page_break in record["page_breaks"]:
         for index, block in enumerate(blocks):
             if not _block_ends(block, page_break["tail"]):
                 continue
             moved: list[int] = []
-            for following in range(index + 1, min(len(blocks), index + 1 + PAGE_BREAK_SEARCH_BLOCKS)):
+            # Steps over any run of figures, tables, and captions (exhibit
+            # pages between the halves); stops at the first other block.
+            for following in range(index + 1, len(blocks)):
                 if _block_starts(blocks[following], page_break["head"]):
-                    joined = _join_blocks(block, blocks[following])
+                    joined = _join_blocks(block, blocks[following], record.get("hyphenation", {}))
                     carried = [blocks[item] for item in moved]
                     blocks[index:following + 1] = [joined, *carried]
                     stats["page_breaks_joined"] += 1
@@ -732,6 +1208,10 @@ def restore_layout_markup(markdown: str, record: dict[str, Any]) -> tuple[str, d
         if ("TB", number) not in seen:
             stats["missing_tokens"].append(f"table {int(number)} (page {table['page']})")
             blocks.append(table["markdown"])
+    for number, caption in record.get("captions", {}).items():
+        if ("CP", number) not in seen:
+            stats["missing_tokens"].append(f"caption {int(number)} (page {caption['page']})")
+            blocks.append(caption["text"])
     return "\n\n".join(blocks).rstrip() + "\n", stats
 
 
