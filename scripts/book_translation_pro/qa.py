@@ -29,8 +29,12 @@ from .figures import STRUCTURED_RECONSTRUCTION_PREFIXES, run_figure_audit
 from .visual import run_visual_qa
 
 
+# Single-letter units (volts, amperes, watts) are upper case and either attached
+# ("230V") or end the phrase ("10 A."); "Exhibit 6.7 A Process" has an article.
 NUMBER_RE = re.compile(
-    r"(?<![a-zA-Z0-9_.])[-+]?\d+(?:[.,]\d+)*(?:\s?(?:%|°[CF]|mm|cm|km|kg|mg|MPa|kPa|Pa|Hz|kHz|MHz|V|A|W)(?![a-zA-Z]))?",
+    r"(?<![a-zA-Z0-9_.])[-+]?\d+(?:[.,]\d+)*"
+    r"(?:\s?(?:%|°[CF]|mm|cm|km|kg|mg|MPa|kPa|Pa|Hz|kHz|MHz)(?![a-zA-Z])"
+    r"|(?-i:[VAW])(?![a-zA-Z])|\s(?-i:[VAW])(?=\s*(?:[.,;:)]|$)))?",
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+")

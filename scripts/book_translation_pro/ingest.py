@@ -280,6 +280,49 @@ def strip_wrapper_divs(markdown: str) -> tuple[str, int]:
     return "\n".join(lines), removed
 
 
+_SPAN_TAG_RE = re.compile(r"<span\b(?P<attrs>[^>]*)>|</span>", re.IGNORECASE)
+_STYLE_ONLY_SPAN_RE = re.compile(r"""^\s*class\s*=\s*(["'])calibre\d+(?:\s+calibre\d+)*\1\s*$""", re.IGNORECASE)
+# Adjacent bold runs left by removed spans ("**GTI Cu****s****tomer**").
+_SPLIT_BOLD_RE = re.compile(r"(?<=\S)\*\*([ \t]*)\*\*(?=\S)")
+
+
+def strip_calibre_spans(markdown: str) -> tuple[str, int]:
+    """Remove Calibre's style-only ``<span class="calibreN">`` wrappers from a PDF draft.
+
+    Calibre wraps nearly every line, and splits small-caps words, in such
+    spans; they carry no meaning once superscripts are tokens, yet they
+    fragment words for the translator.  Spans with any other attribute (an
+    ``id`` link target) are kept, and bold runs they split are rejoined.
+    """
+    lines: list[str] = []
+    removed = 0
+    in_fence = False
+    for line in markdown.split("\n"):
+        if line.lstrip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+        if in_fence or "<span" not in line and "</span>" not in line:
+            lines.append(line)
+            continue
+        kept: list[bool] = []
+        pieces: list[str] = []
+        position = 0
+        for match in _SPAN_TAG_RE.finditer(line):
+            pieces.append(line[position:match.start()])
+            position = match.end()
+            if match.group("attrs") is not None:
+                drop = bool(_STYLE_ONLY_SPAN_RE.match(match.group("attrs")))
+                kept.append(not drop)
+            else:
+                drop = bool(kept) and not kept.pop()
+            if drop:
+                removed += 1
+            else:
+                pieces.append(match.group(0))
+        pieces.append(line[position:])
+        lines.append(_SPLIT_BOLD_RE.sub(r"\1", "".join(pieces)))
+    return "\n".join(lines), removed
+
+
 _TABLE_TAG_RE = re.compile(r"<(/?)(table|thead|tbody|tfoot|tr|td|th)\b([^>]*)>", re.IGNORECASE)
 _TABLE_COLUMNS_RE = re.compile(r"<colgroup\b[^>]*>.*?</colgroup>\s*|<col\b[^>]*>\s*", re.IGNORECASE | re.DOTALL)
 # Spans shape the table and ids are internal link targets; everything else is styling.
@@ -367,9 +410,12 @@ def convert_to_markdown(project: Path, config: dict[str, Any]) -> tuple[Path, di
             markdown, conversion = _convert_with_tools(project, config, pdf_input=cleaned)
         except BTPError as exc:
             markdown, conversion = _convert_pdf_with_pymupdf(project, source, f"Calibre/Pandoc conversion failed: {exc}", cleaned)
-    text, restored = restore_layout_markup(markdown.read_text(encoding="utf-8"), layout)
+    # Style-only spans go first: restoration matches paragraph text, and a
+    # paragraph that opens with "<span" would look like raw HTML.
+    text, conversion["calibre_spans_removed"] = strip_calibre_spans(markdown.read_text(encoding="utf-8"))
+    text, restored = restore_layout_markup(text, layout)
     if conversion["extractor"] != "pymupdf":
-        text, conversion["pdf_headings_promoted"] = promote_headings(text, layout["headings"])
+        text, conversion["pdf_headings_promoted"] = promote_headings(text, layout["headings"], layout.get("heading_runs", []))
     atomic_write_text(markdown, text)
     missing_tokens = restored.pop("missing_tokens")
     shortfall = missing_source_text(source, text, layout)

@@ -333,6 +333,25 @@ class PublicationCleanupTests(unittest.TestCase):
         self.assertEqual(body[0].alignment, WD_ALIGN_PARAGRAPH.CENTER)
         self.assertNotEqual(body[-1].alignment, WD_ALIGN_PARAGRAPH.CENTER)
 
+    def test_a_lone_chapter_named_after_its_heading_has_no_title_page(self) -> None:
+        from docx import Document
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        document = Document()
+        document.add_heading("6 瞄准目标", level=1)
+        intro = document.add_paragraph("引言正文。")
+        document.add_heading("6.1 客户经济学", level=2)
+        _format_title_page(document, {"title": "6 瞄准目标"})
+        self.assertEqual([p.style.name for p in document.paragraphs[:2]], ["Heading 1", "Normal"])
+        self.assertNotEqual(intro.alignment, WD_ALIGN_PARAGRAPH.CENTER)
+        # A book titled "7 Habits ..." with chapters of its own keeps its title page.
+        document = Document()
+        document.add_heading("7 Habits", level=1)
+        document.add_paragraph("A. N. Author")
+        document.add_heading("1 Paradigms", level=1)
+        _format_title_page(document, {"title": "7 Habits"})
+        self.assertEqual(document.paragraphs[0].style.name, "Title")
+
     def test_table_configuration_uses_fixed_layout_without_rewriting_content(self) -> None:
         from docx import Document
         from docx.oxml.ns import qn
@@ -434,6 +453,9 @@ class DocxLayoutTests(unittest.TestCase):
             ["# The Machine Age", "## A. N. Author", "# Copyright and Authorization", "# Chapter 1 The Factory",
              "## not a heading", "## 1.1 Floor", "# Chapter 2 The Workers"],
         )
+        # A lone chapter's numbered sections stay inside it.
+        chapter = ["# 6 On Target", "", "Opening text.", "", "## 6.1 Customer Economics", "", "## 6.2 Costs", "", "## Notes"]
+        self.assertEqual(_lift_chapter_level(chapter), chapter)
         # Two body headings at level 1 already: nothing to lift.
         already = ["# Chapter 1", "", "## 1.1", "", "# Chapter 2", "", "## 2.1"]
         self.assertEqual(_lift_chapter_level(already), already)

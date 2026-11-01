@@ -10,7 +10,25 @@ from pathlib import Path
 from unittest.mock import patch
 
 from book_translation_pro.artifacts import BTPError, load_json
-from book_translation_pro.pdf_text import _has_header, _pipe_table, clean_pdf, promote_headings, restore_layout_markup
+from book_translation_pro.ingest import strip_calibre_spans
+from book_translation_pro.pdf_text import (
+    _caption_candidate,
+    _continues,
+    _has_header,
+    _hyphen_decisions,
+    _inner,
+    _join_blocks,
+    _line_text,
+    _mark_superscripts,
+    _normalize,
+    _pipe_table,
+    _rejoin_hyphenation,
+    _rejoin_wrapped_lines,
+    _split_trailing_captions,
+    clean_pdf,
+    promote_headings,
+    restore_layout_markup,
+)
 from book_translation_pro.project import initialize_project, prepare_project
 
 PAGE_WIDTH, PAGE_HEIGHT = 420, 600
@@ -168,7 +186,7 @@ class RestoreLayout(unittest.TestCase):
         self.assertEqual(blocks[2], "A loose belt could stop for hours when a belt slipped.")
         self.assertIn('<img src="images/000000.png" class="calibre8" />', blocks[3:5])
         self.assertEqual(blocks[-3:], ['<span class="calibre9">Table 1</span>', "| A | B |\n|---|---|\n| 1 | 2 |", "After."])
-        self.assertEqual(stats, {"tables_restored": 1, "footnotes_restored": 1, "page_breaks_joined": 1, "missing_tokens": []})
+        self.assertEqual(stats, {"tables_restored": 1, "footnotes_restored": 1, "page_breaks_joined": 1, "line_wraps_joined": 0, "missing_tokens": []})
 
     def test_lost_placeholders_are_reported_and_kept(self) -> None:
         restored, stats = restore_layout_markup("Nothing survived.\n", self.RECORD)
@@ -228,11 +246,16 @@ class PreparedLayout(unittest.TestCase):
             ])
             furniture = [region for page in pages for region in page["regions"] if region["role"] in {"header", "page_number"}]
             self.assertTrue(all(region["risk"] == 0 and region["disposition"] == "omit_approved" for region in furniture))
+            # The labels inside the page 3 figure went into its image: nothing to review.
+            labels = [region for region in pages[2]["regions"] if region["role"] == "figure"]
+            self.assertEqual([(region["risk"], region["disposition"], region["risk_reasons"]) for region in labels],
+                             [(0, "preserve_asset", ["figure_rendered_as_image"])])
+            self.assertEqual(pages[2]["layout"], "single_column")
 
     def test_page_map_does_not_claim_cleaning_on_a_restored_page(self) -> None:
         import fitz
 
-        def greedy(rect):
+        def greedy(rect, *_shape):
             return fitz.Rect(rect.x0, rect.y0, rect.x1 + 300, rect.y1 + 40)
 
         with tempfile.TemporaryDirectory() as temp:
@@ -381,7 +404,7 @@ class DestructiveRulesNeedTwoSignals(unittest.TestCase):
     def test_page_is_restored_when_removed_text_does_not_balance(self) -> None:
         import fitz
 
-        def greedy(rect):  # a redaction box that also cuts into the body text below
+        def greedy(rect, *_shape):  # a redaction box that also cuts into the body text below
             return fitz.Rect(rect.x0, rect.y0, rect.x1 + 300, rect.y1 + 40)
 
         with tempfile.TemporaryDirectory() as temp:
@@ -423,3 +446,225 @@ class DestructiveRulesNeedTwoSignals(unittest.TestCase):
         self.assertTrue(_has_header([["Year", "Units"], ["1998", "1,200"]], []))
         self.assertFalse(_has_header([["Apples", "red"], ["Lemons", "yellow"]], []))
         self.assertTrue(_has_header([["Fruit", "Colour"], ["Lemons", "yellow"]], [{"text": "Fruit", "flags": 16}, {"text": "Colour", "flags": 16}]))
+
+
+def _span(text: str, x0: float, x1: float, *, size: float = 10.0, flags: int = 0, y0: float = 100.0) -> dict:
+    return {"text": text, "size": size, "flags": flags, "bbox": (x0, y0, x1, y0 + size * 1.2)}
+
+
+def _fake_line(*spans: dict) -> dict:
+    return {"spans": list(spans), "dir": (1, 0), "bbox": (spans[0]["bbox"][0], spans[0]["bbox"][1], spans[-1]["bbox"][2], spans[-1]["bbox"][3])}
+
+
+def _body_page(document, text: str = SENTENCE * 4):
+    import fitz
+
+    page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.insert_textbox(fitz.Rect(40, 60, 380, 300), text, fontsize=10)
+    return page
+
+
+class BookChapterPages(unittest.TestCase):
+    """Layouts met in a real book chapter: sideways exhibits, print slugs, prose grids."""
+
+    def test_sideways_exhibit_becomes_one_upright_figure_under_its_caption(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = fitz.open()
+            _body_page(document)
+            page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+            page.insert_text((60, 520), "EXHIBIT 6.9 Cost Categories by Segment", fontsize=10, rotate=90, fontname="hebo")
+            for column, x in enumerate((110, 160, 210, 260)):
+                for row, y in enumerate((540, 420, 300, 180)):
+                    page.insert_text((x, y), f"R{row}C{column} 1,{row}{column}0", fontsize=9, rotate=90)
+                    page.draw_rect(fitz.Rect(x - 14, y - 110, x + 6, y + 4), color=(0, 0, 0))
+            # An upright page with one sideways margin note is not an exhibit.
+            _body_page(document).insert_text((400, 400), "SIDE NOTE", fontsize=8, rotate=90)
+            document.save(root / "book.pdf")
+            document.close()
+            record = clean_pdf(root / "book.pdf", root / "clean.pdf")
+            self.assertEqual([(item["page"], item["caption"], item["rotation"]) for item in record["figures"]],
+                             [(2, "EXHIBIT 6.9 Cost Categories by Segment", 90)])
+            self.assertEqual(record["captions"], {"0001": {"page": 2, "text": "EXHIBIT 6.9 Cost Categories by Segment"}})
+            kinds = Counter(item["kind"] for item in record["removed"] if item["page"] == 2)
+            self.assertEqual(kinds, {"figure_label": 16, "caption": 1})
+            self.assertFalse(any(item["page"] == 3 for item in record["removed"]))
+            self.assertEqual(record["stats"]["pages_restored_unchanged"], 0)
+            with fitz.open(root / "clean.pdf") as cleaned:
+                self.assertEqual(cleaned[1].get_text().split(), ["BTPCP0001Z"])
+                self.assertEqual(len(cleaned[1].get_images()), 1)
+                self.assertIn("SIDE NOTE", cleaned[2].get_text())
+            restored, stats = restore_layout_markup("Before.\n\nBTPCP0001Z\n\n![](page-0002.png)\n\nAfter.\n", record)
+            self.assertIn("EXHIBIT 6.9 Cost Categories by Segment", restored)
+            self.assertNotIn("BTPCP", restored)
+            self.assertEqual(stats["missing_tokens"], [])
+
+    def test_redaction_inset_runs_across_the_line_and_is_capped_by_type_size(self) -> None:
+        import fitz
+
+        vertical = _inner(fitz.Rect(100, 300, 112, 500), (0, -1), 9)
+        # Shrinking along a vertical line would leave its ends on the page.
+        self.assertEqual((vertical.y0, vertical.y1), (300.5, 499.5))
+        self.assertAlmostEqual(vertical.x0, 102.7)
+        # A tall line (a letter stacked over a column of dots) loses only 0.3 x size.
+        tall = _inner(fitz.Rect(40, 100, 300, 160), (1, 0), 10)
+        self.assertEqual((tall.y0, tall.y1), (103, 157))
+
+    def test_ruled_grid_of_paragraphs_is_left_as_text(self) -> None:
+        import fitz
+
+        long = ("Each customer segment receives a different mix of service attributes, and the cost of every "
+                "attribute is traced to the activities that create it, so that managers can see which earn their keep. ")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = fitz.open()
+            page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+            # A flowchart drawn as a ruled grid: step labels over paragraph boxes.
+            for row, (top, bottom) in enumerate(((100, 130), (130, 400))):
+                for column, x in enumerate((40, 210)):
+                    page.draw_rect(fitz.Rect(x, top, x + 170, bottom), color=(0, 0, 0))
+                    if row == 0:
+                        page.insert_text((x + 5, top + 18), f"Step {column + 1}", fontsize=9)
+                    else:
+                        page.insert_textbox(fitz.Rect(x + 5, top + 5, x + 165, bottom - 5), long * 2, fontsize=9)
+            document.save(root / "flow.pdf")
+            document.close()
+            record = clean_pdf(root / "flow.pdf", root / "clean.pdf")
+            self.assertEqual(record["tables"], {})
+            with fitz.open(root / "clean.pdf") as cleaned:
+                self.assertIn("managers can see which", cleaned[0].get_text())
+
+    def test_print_slugs_outside_the_trim_box_are_removed_and_logged(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = fitz.open()
+            for number in range(2):
+                page = document.new_page(width=480, height=660)
+                page.insert_text((40, 20), f"ch06.qxd 2/2/07 3:40 PM Page {122 + number}", fontsize=8)
+                page.insert_textbox(fitz.Rect(70, 90, 410, 330), SENTENCE * 4, fontsize=10)
+                page.set_cropbox(fitz.Rect(30, 30, 450, 630))
+            document.save(root / "slug.pdf")
+            document.close()
+            record = clean_pdf(root / "slug.pdf", root / "clean.pdf")
+            self.assertEqual(record["print_marks"], [
+                {"page": 1, "text": "ch06.qxd 2/2/07 3:40 PM Page 122"},
+                {"page": 2, "text": "ch06.qxd 2/2/07 3:40 PM Page 123"},
+            ])
+            self.assertEqual(record["stats"]["print_marks_removed"], 2)
+            flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_MEDIABOX_CLIP
+            with fitz.open(root / "clean.pdf") as cleaned:
+                for page in cleaned:
+                    self.assertNotIn("qxd", page.get_text("text", flags=flags, clip=fitz.INFINITE_RECT()))
+                    self.assertIn("operators inspected", page.get_text())
+
+    def test_line_wraps_are_recorded_for_prose_but_not_for_verse(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = fitz.open()
+            page = document.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+            # A centered epigraph sets each line as its own block.
+            page.insert_text((40, 60), "The more you know about your customers, the better you can serve and", fontsize=10)
+            page.insert_text((180, 74), "sell them.", fontsize=10)
+            for index, text in enumerate(("the river runs on and on", "and the long grass bending", "under the wind")):
+                page.insert_text((80, 200 + index * 14), text, fontsize=10)
+            for index, text in enumerate(("beside the mill the water", "turns the wheel")):  # verse, one line per block
+                page.insert_text((80, 300 + index * 14), text, fontsize=10)
+            document.save(root / "wraps.pdf")
+            document.close()
+            record = clean_pdf(root / "wraps.pdf", root / "clean.pdf")
+            self.assertEqual(record["line_wraps"], [{"tail": "er you can serve and", "head": "sell them."}])
+
+    def test_captions_need_type_of_their_own(self) -> None:
+        prose = _fake_line(_span("Exhibit 6.13 shows the cost of each segment.", 40, 300))
+        self.assertFalse(_caption_candidate(prose, 10))
+        self.assertTrue(_caption_candidate(_fake_line(_span("Exhibit 6.13 Segment costs", 40, 200, size=9)), 10))
+        self.assertTrue(_caption_candidate(_fake_line(_span("EXHIBIT 6.13 Segment costs", 40, 200, flags=16)), 10))
+        self.assertFalse(_caption_candidate(_fake_line(_span("Exhibit 6.13 Segment costs", 40, 200, size=12, flags=16)), 10))
+
+    def test_small_capitals_join_into_words(self) -> None:
+        line = _fake_line(_span("O", 40, 48, size=12), _span("N", 48.5, 55, size=9), _span("T", 60, 67, size=12), _span("ARGET", 67.2, 100, size=9))
+        self.assertEqual(_line_text(line), "ON TARGET")
+
+
+class BookChapterRestore(unittest.TestCase):
+    """Calibre output put back together using what the PDF layout recorded."""
+
+    def test_superscripts_are_marked_after_their_word_or_reported(self) -> None:
+        superscripts = {
+            "0001": {"page": 1, "text": "1", "after": "them."},
+            "0002": {"page": 2, "text": "2", "after": "Baggaley,"},
+            "0003": {"page": 3, "text": "4", "after": "missing"},
+        }
+        marked, unplaced = _mark_superscripts("*sell them.* *1*\n\nAs Baggaley,2 said in 2004.\n", superscripts)
+        self.assertEqual(marked, "*sell them.*^1^\n\nAs Baggaley,^2^ said in 2004.\n")
+        self.assertEqual(unplaced, ["superscript 4 (page 3)"])
+        # The first digit of a year after the same word is not a marker.
+        year, unplaced = _mark_superscripts("founded in 2005.\n", {"0001": {"page": 1, "text": "2", "after": "in"}})
+        self.assertEqual((year, unplaced), ("founded in 2005.\n", ["superscript 2 (page 1)"]))
+
+    def test_line_end_hyphens_follow_the_book_spelling(self) -> None:
+        vocabulary = ({"customer-driven", "value-add"}, {"customer", "driven", "operators", "value", "add"})
+        self.assertEqual(_hyphen_decisions("the op-", "erators checked", vocabulary), {"op-erators": "operators"})
+        self.assertEqual(_hyphen_decisions("is customer-", "driven and", vocabulary),
+                         {"customer-driven": "customer-driven", "customerdriven": "customer-driven"})
+        # The part after the break is itself hyphenated: the break is a real hyphen.
+        self.assertEqual(_hyphen_decisions("the business-", "value-add work", vocabulary),
+                         {"business-value": "business-value", "businessvalue": "business-value"})
+        # A glued form the book prints itself is never rewritten.
+        self.assertEqual(_hyphen_decisions("the data-", "base grew", ({"data-base"}, {"database"})), {"data-base": "data-base"})
+        self.assertEqual(_hyphen_decisions("Smith-", "Jones said", vocabulary), {})
+        self.assertEqual(_hyphen_decisions("the end.", "next line", vocabulary), {})
+
+    def test_hyphenation_rejoins_within_a_paragraph_only(self) -> None:
+        decisions = {"op-erators": "operators", "de-fined": "defined", "value-add": "value-add", "valueadd": "value-add"}
+        rejoined = _rejoin_hyphenation("the op-\nerators and *de-* *fined* the valueadd.\n\nop-\n\nerators\n", decisions)
+        self.assertEqual(rejoined, "the operators and *defined* the value-add.\n\nop-\n\nerators\n")
+        self.assertEqual(_join_blocks("a business-", "value-add view", {"business-value": "business-value"}), "a business-value-add view")
+        self.assertEqual(_join_blocks("the op-", "erators"), "the operators")
+
+    def test_paragraphs_split_at_a_line_wrap_are_rejoined(self) -> None:
+        first = "The more you know, the better you can serve and"
+        wraps = [{"tail": _normalize(first)[-20:], "head": "sell them."}]
+        joined, count = _rejoin_wrapped_lines([first, "sell them.", "Unrelated paragraph.", "sell them."], wraps)
+        self.assertEqual((joined, count), ([f"{first} sell them.", "Unrelated paragraph.", "sell them."], 1))
+        # A heading or a table row with the same words is never a wrapped line.
+        for block in (f"## {first}", f"| {first}"):
+            self.assertEqual(_rejoin_wrapped_lines([block, "sell them."], wraps), ([block, "sell them."], 0))
+
+    def test_captions_run_onto_a_paragraph_get_their_own_block(self) -> None:
+        captions = ["EXHIBIT 6.11 GTI Customer Segments"]
+        self.assertEqual(
+            _split_trailing_captions(["Clearly, the segments differ. **EXHIBIT 6.11 GTI Customer Segments**"], captions),
+            ["Clearly, the segments differ.", "**EXHIBIT 6.11 GTI Customer Segments**"],
+        )
+        self.assertEqual(
+            _split_trailing_captions(["**EXHIBIT 6.11 GTI Customer Segments** costs rose as well."], captions),
+            ["**EXHIBIT 6.11 GTI Customer Segments**", "costs rose as well."],
+        )
+        # A citation in the sentence is not bold; an unknown bold caption is not this figure's.
+        for block in ("as shown in EXHIBIT 6.11 GTI Customer Segments", "Text. **EXHIBIT 9.9 Other Things**"):
+            self.assertEqual(_split_trailing_captions([block], captions), [block])
+
+    def test_page_break_continues_into_a_number(self) -> None:
+        self.assertTrue(_continues("for 2005 actual expenditures,", "2006 projected expenditures"))
+        self.assertFalse(_continues("the year ended.", "2006 was better"))
+        self.assertFalse(_continues("as shown in", "Exhibit 6.2"))
+
+    def test_style_only_calibre_spans_are_stripped(self) -> None:
+        markdown = (
+            '<span class="calibre3">The</span> <span class="calibre5">O</span><span class="calibre6">N</span> line '
+            '<span id="calibre_link-4" class="calibre2">kept</span> **Ex**<span class="calibre1">**hibit**</span> done\n'
+            '```\n<span class="calibre1">code</span>\n```\n'
+        )
+        stripped, removed = strip_calibre_spans(markdown)
+        self.assertEqual(stripped, (
+            'The ON line <span id="calibre_link-4" class="calibre2">kept</span> **Exhibit** done\n'
+            '```\n<span class="calibre1">code</span>\n```\n'
+        ))
+        self.assertEqual(removed, 8)

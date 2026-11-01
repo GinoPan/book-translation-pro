@@ -127,6 +127,11 @@ class RightsTests(unittest.TestCase):
         original = "# 示例书\n\n## 第一章 机器\n\n### 1.1 背景\n\n正文。\n"
         rendered = insert_rights_notice(original, config)
         self.assertLess(rendered.index("# 版权与授权"), rendered.index("## 第一章 机器"))
+        # A chapter opener runs straight into body text: the notice is its own page in front of it.
+        original = "# 6 瞄准目标\n\nC. J. 麦克奈尔\n\n*引语*\n\n## 6.1 客户经济学\n\n正文。\n"
+        rendered = insert_rights_notice(original, config)
+        self.assertTrue(rendered.startswith("<!-- btp:rights-notice -->\n\n# 版权与授权"))
+        self.assertTrue(rendered.endswith(original.rstrip("\n")))
         # A front-matter heading with its own text is not part of the title page.
         original = "# 示例书\n\n## 前言\n\n前言正文。\n"
         rendered = insert_rights_notice(original, config)
