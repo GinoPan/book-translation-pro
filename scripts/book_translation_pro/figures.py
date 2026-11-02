@@ -30,8 +30,10 @@ SOURCE_CAPTION_RE = re.compile(
     r"((?i:[0-9]+(?:[.\-–][0-9]+)*[a-z]?)|[IVXLC]+)"
     # A caption label ends the line or is followed by a separator or a
     # capitalized title; prose citing a figure continues in lower case
-    # ("Figure 3 shows ...").
-    r"(?=\s*$|\s*[:：.．\-–—|]|\s+[A-Z\"'“‘]|\s*[^\x00-\x7f])"
+    # ("Figure 3 shows ...").  A dot/dash separator followed by a digit is
+    # part of a longer number ("Exhibit 2.4 shows ..." must not backtrack
+    # into a bare "Exhibit 2" caption), so it never ends a caption.
+    r"(?=\s*$|\s*[:：]|\s*[.．\-–—|](?!\d)|\s+[A-Z\"'“‘]|\s*[^\x00-\x7f])"
 )
 # A list-of-figures entry: the title runs into a dot leader and a page number.
 LIST_LEADER_RE = re.compile(r"(?:\.\s*){4,}\S*\s*$|…{2,}")

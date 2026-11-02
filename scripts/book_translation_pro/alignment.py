@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from textwrap import dedent
 from pathlib import Path
 from typing import Any
 
@@ -66,19 +67,77 @@ def _paired_blocks(source: str, target: str) -> list[tuple[str, str]]:
     """
     source_blocks, target_blocks = parse_blocks(source), parse_blocks(target)
     if len(source_blocks) > 1 and [block.kind for block in source_blocks] == [block.kind for block in target_blocks]:
-        return [(left.text, right.text) for left, right in zip(source_blocks, target_blocks)]
+        return list(zip(_standalone_texts(source_blocks), _standalone_texts(target_blocks)))
     return [(source, target)]
+
+
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+
+
+def _standalone_texts(blocks: list[Any]) -> list[str]:
+    """Block texts made safe to stand alone inside an alignment div.
+
+    A list item's continuation block keeps its indentation; standing alone
+    that reads as a code block to Pandoc, and its images and anchors would
+    never reach the edition as elements, so it is dedented.  An indented
+    block outside a list is a real code block and keeps its indentation.
+    """
+    texts: list[str] = []
+    in_list = False
+    for block in blocks:
+        first = block.text.splitlines()[0]
+        indent = len(first) - len(first.lstrip())
+        if _LIST_ITEM_RE.match(first):
+            in_list = True
+        elif not indent:
+            in_list = False
+        texts.append(dedent(block.text) if in_list or indent < 4 else block.text)
+    return texts
+
+
+_ID_SPAN_RE = re.compile(
+    r"<span\b[^>]*\bid\s*=\s*[\"']([^\"']+)[\"'][^>]*>\s*</span>",
+    re.IGNORECASE,
+)
+_PAGE_ANCHOR_RE = re.compile(r"<a\b[^>]*\bhref\s*=\s*[\"']#([^\"']+)[\"']", re.IGNORECASE)
+
+
+def _drop_wrapper_tags(fragment: str, side: str, seen: set[str]) -> str:
+    """Drop div/span wrapper tags; keep id anchors, namespaced by language side.
+
+    Wrappers that open in one work unit and close in a later one cannot nest
+    inside per-alignment containers, so their tags are removed.  An empty
+    ``<span id="ch01fig01"></span>`` is a self-contained link target for the
+    source's internal cross-references, so it stays — but the id and every
+    in-page reference get a side prefix, because the source and target halves
+    of one unit carry the same ids and cross-unit links must keep resolving
+    (the namespace is per side, not per unit).  CHM topics repeat their
+    chapter anchor on every page, so only the first occurrence per side is
+    kept as an anchor; later ones would be duplicate ids.
+    """
+    anchors: list[str] = []
+
+    def stash(match: re.Match[str]) -> str:
+        identifier = f"{side}-{match.group(1)}"
+        anchors.append(f'<span id="{identifier}"></span>' if identifier not in seen else "")
+        seen.add(identifier)
+        return f"\x00btp-anchor-{len(anchors) - 1}\x00"
+
+    fragment = _ID_SPAN_RE.sub(stash, fragment)
+    fragment = _PAGE_ANCHOR_RE.sub(lambda match: match.group(0).replace(f"#{match.group(1)}", f"#{side}-{match.group(1)}"), fragment)
+    fragment = re.sub(r"</?(?:div|span)\b[^>]*>", "", fragment, flags=re.IGNORECASE)
+    for index, anchor in enumerate(anchors):
+        fragment = fragment.replace(f"\x00btp-anchor-{index}\x00", anchor)
+    return fragment
 
 
 def render_bilingual_markdown(alignment: dict[str, Any], destination: Path | None = None) -> str:
     validate_schema(alignment, "segment-alignment.schema.json")
     blocks: list[str] = []
+    seen_ids: dict[str, set[str]] = {"src": set(), "tgt": set()}
     for item in sorted(alignment["items"], key=lambda row: row["order"]):
-        # Extraction wrappers frequently open in one work unit and close in a
-        # later unit. They cannot be nested safely inside per-alignment
-        # containers, so retain their content and drop only div/span wrappers.
-        source_fragment = re.sub(r"</?(?:div|span)\b[^>]*>", "", item["source_text"], flags=re.IGNORECASE)
-        target_fragment = re.sub(r"</?(?:div|span)\b[^>]*>", "", item["target_text"], flags=re.IGNORECASE)
+        source_fragment = _drop_wrapper_tags(item["source_text"], "src", seen_ids["src"])
+        target_fragment = _drop_wrapper_tags(item["target_text"], "tgt", seen_ids["tgt"])
         def strip_extraction_links(value: str) -> str:
             value = re.sub(
                 r"\[((?:\\[\[\]]|[^\]])+)\]\(#calibre_link-\d+(?:\s+[\"'][^\"']*[\"'])?\)",

@@ -99,6 +99,39 @@ class V1ContractTests(unittest.TestCase):
         # A merged paragraph changes the shape, so the unit is shown whole.
         whole = render("# Bearing\n\nFirst paragraph.\n\nSecond paragraph.", "# 轴承\n\n第一段。第二段。")
         self.assertEqual(len([line for line in whole.splitlines() if line.startswith(":::") and "{" in line]), 2)
+        # A list item's indented continuation stands alone dedented, so its
+        # image stays an image; an indented code block keeps its indentation.
+        listed = render("1. Item\n\n    ![Flow](assets/flow.png)", "1. 项\n\n    ![流程](assets/flow.png)")
+        self.assertIn("\n![Flow](assets/flow.png)\n", listed)
+        self.assertIn("\n![流程](assets/flow.png)\n", listed)
+        code = render("Run this:\n\n    make all\n    make test", "运行：\n\n    make all\n    make test")
+        self.assertIn("\n    make all\n    make test\n", code)
+
+    def test_bilingual_keeps_id_anchors_namespaced_per_language_side(self) -> None:
+        def item(order: int, source: str, target: str) -> dict:
+            return {
+                "id": f"align-{order + 1:04d}", "order": order, "unit_id": f"unit-{order + 1:04d}",
+                "book_node_id": None, "source_segment_ids": [f"seg-{order + 1:06d}"],
+                "source_text": source, "target_text": target,
+                "source_sha256": "a" * 64, "target_sha256": "b" * 64,
+            }
+
+        rendered = render_bilingual_markdown({
+            "schema_version": 1, "source_fingerprint": "a" * 64, "target_language": "zh-Hans",
+            "items": [
+                item(0, '<div class="topic"><span id="ch01"></span>Opening text.',
+                     '<div class="topic"><span id="ch01"></span>开篇正文。'),
+                item(1, '<span id="ch01"></span>See <a href="#ch01">the opening</a>.</div>',
+                     '<span id="ch01"></span>见<a href="#ch01">开篇</a>。</div>'),
+            ],
+        })
+        # One anchor per side (the repeat is dropped), links follow their side,
+        # and the cross-unit wrapper div is gone.
+        self.assertEqual(rendered.count('<span id="src-ch01"></span>'), 1)
+        self.assertEqual(rendered.count('<span id="tgt-ch01"></span>'), 1)
+        self.assertIn('<a href="#src-ch01">the opening</a>', rendered)
+        self.assertIn('<a href="#tgt-ch01">开篇</a>', rendered)
+        self.assertNotIn('class="topic"', rendered)
 
     def test_project_glossary_overlays_reusable_library(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
