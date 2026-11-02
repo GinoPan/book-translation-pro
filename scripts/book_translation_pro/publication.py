@@ -13,7 +13,7 @@ import unicodedata
 import zipfile
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
@@ -69,6 +69,39 @@ LINKED_MARKDOWN_IMAGE_RE = re.compile(
     r"!\[(?P<alt>[^]]*)\]\((?P<src>[^)\s]+)(?P<title>\s+[^)]*)?\)\s*</a>",
     re.IGNORECASE | re.DOTALL,
 )
+ANCHOR_TAG_RE = re.compile(r"<a\b(?P<attrs>[^>]*)>(?P<body>(?:(?!<a\b).)*?)</a>", re.IGNORECASE | re.DOTALL)
+HREF_ATTR_RE = re.compile(r"\bhref\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)", re.IGNORECASE | re.DOTALL)
+ID_ATTR_RE = re.compile(r"\bid\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+# CHM sources mark footnotes as a bracketed superscript anchor pair:
+# <sup>[<a href="#ftn.ch01fnt01" id="ch01fnt01">1</a>]</sup> in the body and
+# the mirrored form on the note itself.  Both sides of a bilingual edition
+# carry the same ids, so the markup becomes plain superscripts.
+ANCHORED_NOTE_RE = re.compile(
+    r"<sup>\s*\\?\[?\s*<a\b[^>]*>\s*\*?(\d{1,3})\*?\s*</a>\s*\\?\]?\s*</sup>",
+    re.IGNORECASE,
+)
+# A file-relative link to a page of the source container (CHM help topics
+# such as ``7485final/LiB0115.html``, EPUB ``chapter02.xhtml#s1``): no
+# generated edition ships those pages.  Schemes, in-page jumps and asset
+# links do not match.
+_CONTAINER_PAGE_HREF_RE = re.compile(
+    r"^(?![a-zA-Z][a-zA-Z0-9+.\-]*:)[^#?\s]+\.x?html?(?:[#?]\S*)?$", re.IGNORECASE
+)
+# Role values EPUBCheck accepts on an ``<a href>`` element; source containers
+# carry UI roles such as ``chapterjump`` that fail validation.
+EPUB_ROLE_VALUES = frozenset((
+    "button", "checkbox", "doc-backlink", "doc-biblioref", "doc-glossref",
+    "doc-noteref", "link", "menuitem", "menuitemcheckbox", "menuitemradio",
+    "option", "radio", "switch", "tab", "treeitem",
+))
+ROLE_ATTR_RE = re.compile(r"\s+role\s*=\s*[\"'](?P<value>[^\"']*)[\"']", re.IGNORECASE)
+ANCHOR_OPEN_TAG_RE = re.compile(r"<a\b[^>]*>", re.IGNORECASE)
+HTML_OPEN_TAG_RE = re.compile(r"<[a-zA-Z][^<>]*>")
+EMPTY_ID_SPAN_RE = re.compile(r"<span\b[^>]*\bid\s*=\s*[\"'][^\"']+[\"'][^>]*>\s*</span>", re.IGNORECASE)
+# Pandoc attribute blocks: ``{#id .class}`` on headings, divs and spans.
+PANDOC_ID_ATTR_RE = re.compile(r"\{[^{}\n]*?#(?P<id>[^\s{}#]+)[^{}\n]*\}")
+MD_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6} )(?P<body>.*)$", re.MULTILINE)
+MD_IMAGE_RE = re.compile(r"!\[(?P<alt>[^]]*)\]\([^)\s]*(?:\s+[^)]*)?\)")
 FOOTNOTE_SPAN_RE = re.compile(
     r"<span\b(?P<attrs>[^>]*)>\s*(?P<number>\*?\d+\*?)\s*</span>",
     re.IGNORECASE,
@@ -761,28 +794,36 @@ def validate_publication_outputs(
     # Pandoc builds a table from every master pipe-table block, but generated
     # formats legitimately end up with fewer table ELEMENTS: Word merges
     # adjacent tables on save (content verified intact) and both Pandoc
-    # renders agree with each other.  When every generated format reports the
-    # same table count while the master counts higher, the shrinkage is a
-    # counting artifact of the master — downgrade to a warning.  Formats that
-    # disagree with each other still block: that is real generation loss.
+    # renders agree with each other.  When every generated format of one
+    # edition reports the same table count while its master counts higher,
+    # the shrinkage is a counting artifact of that master — downgrade to a
+    # warning.  The bilingual edition renders from its own master, so it is
+    # compared only against its own formats; editions must not be required to
+    # agree with each other.  Formats that disagree within their edition
+    # still block: that is real generation loss.
     table_counts = {
         label[:-len("_content")]: checks[label].get("actual", {}).get("table_count")
         for label in checks
         if label.endswith("_content") and checks[label].get("actual", {}).get("table_count") is not None
     }
-    counts_present = list(table_counts.values())
-    if len(counts_present) >= 2 and len(set(counts_present)) == 1:
+    for group in (
+        [label for label in table_counts if label.startswith("bilingual_")],
+        [label for label in table_counts if not label.startswith("bilingual_")],
+    ):
+        counts_present = [table_counts[label] for label in group]
+        if len(counts_present) < 2 or len(set(counts_present)) != 1:
+            continue
         agreed_count = counts_present[0]
-        for label, count in table_counts.items():
+        for label in group:
             inventory = checks[f"{label}_content"]
             expected_tables = inventory.get("expected", {}).get("table_count", 0)
-            if count < expected_tables:
+            if agreed_count < expected_tables:
                 inventory["errors"] = [
                     message for message in inventory["errors"] if "table inventory shrank" not in message
                 ]
                 inventory["passed"] = not inventory["errors"]
                 inventory["warnings"].append(
-                    f"{label} table element count ({count}) agrees across all generated formats; "
+                    f"{label} table element count ({agreed_count}) agrees across the edition's formats; "
                     "the master pipe-table count includes layout tables the renderers merge on save"
                 )
                 errors = [
@@ -1649,9 +1690,168 @@ def _lift_chapter_level(lines: list[str]) -> list[str]:
     return lifted
 
 
+def _outside_fences(markdown: str, transform: Callable[[str], str]) -> str:
+    """Apply ``transform`` to the text outside fenced code blocks only.
+
+    The raw-HTML hygiene passes below edit tags; inside a fence the same tags
+    are a book's code samples and must reach the edition unchanged.
+    """
+    parts: list[str] = []
+    chunk: list[str] = []
+    fenced = False
+    for line in markdown.splitlines(keepends=True):
+        fence = line.lstrip().startswith(("```", "~~~"))
+        if fence and not fenced:
+            parts.append(transform("".join(chunk)))
+            chunk = []
+        chunk.append(line)
+        if fence:
+            fenced = not fenced
+            if not fenced:
+                parts.append("".join(chunk))
+                chunk = []
+    tail = "".join(chunk)
+    parts.append(tail if fenced else transform(tail))
+    return "".join(parts)
+
+
+def _neutralize_dead_local_anchors(markdown: str) -> str:
+    """Flatten raw anchors that link to a page of the source container.
+
+    CHM/EPUB extraction carries navigation anchors such as
+    ``<a href="7485final/LiB0115.html">…</a>`` that point into the decompiled
+    container.  No generated edition ships those pages, so the anchors become
+    dead resource references (EPUB RSC-007).  The visible text stays; only the
+    anchor markup goes.  Every other href is left untouched.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        href_match = HREF_ATTR_RE.search(match.group("attrs"))
+        if not href_match:
+            return match.group(0)
+        href = href_match.group("value").strip().replace("\\", "/")
+        if not _CONTAINER_PAGE_HREF_RE.match(href):
+            return match.group(0)
+        return match.group("body")
+
+    return _outside_fences(markdown, lambda text: ANCHOR_TAG_RE.sub(replace, text))
+
+
+def _normalize_asset_paths(markdown: str) -> str:
+    """Forward slashes in raw tag asset paths; backslashes break resource lookup."""
+
+    def fix_attribute(match: re.Match[str]) -> str:
+        return match.group(0).replace("\\", "/")
+
+    def fix_tag(match: re.Match[str]) -> str:
+        return re.sub(
+            r"\b(?:src|href)\s*=\s*[\"'][^\"']*\\[^\"']*[\"']",
+            fix_attribute,
+            match.group(0),
+            flags=re.IGNORECASE,
+        )
+
+    return _outside_fences(markdown, lambda text: HTML_OPEN_TAG_RE.sub(fix_tag, text))
+
+
+def _normalize_anchored_footnote_markers(markdown: str) -> str:
+    """Turn bracketed superscript anchor markers into plain superscripts."""
+    return _outside_fences(markdown, lambda text: ANCHORED_NOTE_RE.sub(r"^\1^", text))
+
+
+def _pandoc_identifier(heading: str) -> str:
+    """Pandoc's ``auto_identifiers`` id for a Markdown heading text."""
+    text = re.sub(r"<[^>]+>", "", heading)
+    text = "".join(char for char in text if char.isalnum() or char in "_-." or char.isspace())
+    text = re.sub(r"\s+", "-", text.strip()).lower()
+    return re.sub(r"^[^a-zÀ-￿]+", "", text)
+
+
+def _neutralize_dead_page_anchors(markdown: str) -> str:
+    """Flatten raw in-page anchors whose target exists nowhere in the edition.
+
+    Cross-references such as ``<a href="#citeams">CI Teams</a>`` point at link
+    targets of the source container that no generated edition carries.  A
+    target is live when the document holds it as an ``id`` attribute, a Pandoc
+    ``{#id}`` attribute, or a heading id Pandoc derives (with its ``-1``, ``-2``
+    suffixes for repeats), so working internal links are left alone.  The
+    visible text stays; only the anchor markup goes.
+    """
+    prose: list[str] = []
+    _outside_fences(markdown, lambda text: prose.append(text) or text)
+    prose_text = "".join(prose)
+    live = set(ID_ATTR_RE.findall(prose_text))
+    live.update(match.group("id") for match in PANDOC_ID_ATTR_RE.finditer(prose_text))
+    repeats: dict[str, int] = {}
+    for match in MD_HEADING_RE.finditer(prose_text):
+        identifier = _pandoc_identifier(PANDOC_ID_ATTR_RE.sub("", match.group("body"))) or "section"
+        count = repeats.get(identifier, 0)
+        repeats[identifier] = count + 1
+        live.add(identifier if not count else f"{identifier}-{count}")
+
+    def replace(match: re.Match[str]) -> str:
+        href_match = HREF_ATTR_RE.search(match.group("attrs"))
+        if not href_match:
+            return match.group(0)
+        href = href_match.group("value").strip()
+        if not href.startswith("#") or href[1:] in live:
+            return match.group(0)
+        return match.group("body")
+
+    return _outside_fences(markdown, lambda text: ANCHOR_TAG_RE.sub(replace, text))
+
+
+def _strip_invalid_epub_roles(markdown: str) -> str:
+    """Drop role attributes of ``<a>`` tags whose value EPUBCheck would reject."""
+
+    def fix_role(match: re.Match[str]) -> str:
+        values = match.group("value").split()
+        return match.group(0) if values and all(value in EPUB_ROLE_VALUES for value in values) else ""
+
+    def fix_tag(match: re.Match[str]) -> str:
+        return ROLE_ATTR_RE.sub(fix_role, match.group(0))
+
+    return _outside_fences(markdown, lambda text: ANCHOR_OPEN_TAG_RE.sub(fix_tag, text))
+
+
+HEADING_LIFTED_MARKUP_RE = re.compile(
+    r"<span\b[^>]*>\s*<img\b[^>]*>\s*</span>|<img\b[^>]*>|"
+    + MD_IMAGE_RE.pattern + "|" + EMPTY_ID_SPAN_RE.pattern,
+    re.IGNORECASE,
+)
+
+
+def _lift_heading_images(markdown: str) -> str:
+    """Move images and empty id anchors out of headings, just below them.
+
+    Source-container icons in headings leak into the EPUB navigation
+    document, where their relative path is wrong, and a textless id span
+    there fails EPUBCheck.  Nothing is deleted: the lifted markup becomes a
+    paragraph under the heading, so figures stay in the book and links to the
+    anchors keep resolving.  A heading left without text takes the image's
+    alt text.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        body = match.group("body")
+        lifted = [item.group(0) for item in HEADING_LIFTED_MARKUP_RE.finditer(body)]
+        if not lifted:
+            return match.group(0)
+        text = " ".join(HEADING_LIFTED_MARKUP_RE.sub(" ", body).split())
+        if not text:
+            alts = re.findall(r"<img\b[^>]*\balt\s*=\s*[\"']([^\"']*)[\"']|!\[([^]]*)\]", body, re.IGNORECASE)
+            text = next((alt.strip() for pair in alts for alt in pair if alt.strip()), "")
+        return f"{match.group('hashes')}{text}".rstrip() + "\n\n" + " ".join(lifted)
+
+    return _outside_fences(markdown, lambda text: MD_HEADING_RE.sub(replace, text))
+
+
 def clean_markdown_for_publication(markdown: str, continuation: str = "（续表）") -> str:
     """Remove print-production residue and normalize common book structure."""
+    markdown = _neutralize_dead_local_anchors(markdown)
+    markdown = _strip_invalid_epub_roles(markdown)
     markdown = _normalize_html_headings(markdown)
+    markdown = _lift_heading_images(markdown)
     lines = _strip_print_artifacts(markdown)
     lines = _replace_static_toc(lines)
     lines = _normalize_structure(lines)
@@ -2839,6 +3039,23 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
         bilingual_markdown = output_dir / "book-bilingual.md"
         render_bilingual_markdown(alignment, bilingual_markdown)
         bilingual_text = bilingual_markdown.read_text(encoding="utf-8")
+        # The bilingual edition renders the raw unit files, so it needs the
+        # same raw-HTML hygiene as the clean master: source-container anchors
+        # and roles that no edition ships, icons riding in headings, anchored
+        # footnote markers whose ids repeat on both language sides, raw HTML
+        # tables (whose bare attributes and backslash paths make the XHTML
+        # ill-formed and which the DOCX writer would drop entirely), and
+        # in-page links to targets the edition does not carry.
+        bilingual_text = _normalize_anchored_footnote_markers(bilingual_text)
+        bilingual_text = _neutralize_dead_local_anchors(bilingual_text)
+        bilingual_text = _strip_invalid_epub_roles(bilingual_text)
+        bilingual_text = _lift_heading_images(bilingual_text)
+        bilingual_text = _convert_html_tables(bilingual_text)
+        # <br> short forms inside converted cells are invalid XML and break
+        # the semantic XHTML/EPUB build, exactly as in the clean master.
+        bilingual_text = re.sub(r"<br\s*/?>", "<br/>", bilingual_text, flags=re.IGNORECASE)
+        bilingual_text = _normalize_asset_paths(bilingual_text)
+        bilingual_text = _neutralize_dead_page_anchors(bilingual_text)
         atomic_write_text(bilingual_markdown, insert_rights_notice(bilingual_text, config))
         generated["bilingual_markdown"] = bilingual_markdown
         bilingual_formats = set(config.get("publishing", {}).get("bilingual_formats", ["markdown", "docx", "epub"]))
@@ -2885,6 +3102,7 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
             if cover_ref:
                 command.append(f"--epub-cover-image={safe_project_path(project, cover_ref)}")
             _run([*command, "--output", str(bilingual_epub)], project)
+            _repair_epub_note_backlinks(bilingual_epub)
             generated["bilingual_epub"] = bilingual_epub
 
         if "pdf" in bilingual_formats:

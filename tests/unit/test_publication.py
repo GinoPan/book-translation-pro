@@ -394,6 +394,53 @@ class PublicationCleanupTests(unittest.TestCase):
             self.assertTrue(any("table inventory shrank" in error for error in result["errors"]))
             self.assertTrue(any("image inventory shrank" in error for error in result["errors"]))
 
+    def _table_gate(self, counts: dict[str, int], expected: int) -> dict:
+        """Run the output validator with every format reporting a table count."""
+        from unittest import mock
+
+        def inventory(kind, path, master, project=None):
+            label = path.stem
+            return {
+                "passed": counts[label] >= expected,
+                "errors": [] if counts[label] >= expected else [f"table inventory shrank ({counts[label]} of {expected})"],
+                "warnings": [],
+                "expected": {"table_count": expected},
+                "actual": {"table_count": counts[label]},
+            }
+
+        clean = lambda *args, **kwargs: {"passed": True, "errors": [], "warnings": []}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "book.md").write_text("Body.\n", encoding="utf-8")
+            (root / "book-bilingual.md").write_text("Body.\n", encoding="utf-8")
+            generated = {"markdown": root / "book.md", "bilingual_markdown": root / "book-bilingual.md"}
+            for label in counts:
+                generated[label] = root / f"{label}.{label.removeprefix('bilingual_')}"
+                generated[label].write_bytes(b"x")
+            with mock.patch("book_translation_pro.publication._content_inventory_check", inventory), \
+                    mock.patch("book_translation_pro.publication.validate_docx_package", clean), \
+                    mock.patch("book_translation_pro.publication.validate_epub_package", clean), \
+                    mock.patch("book_translation_pro.publication.validate_pdf_package", clean), \
+                    mock.patch("book_translation_pro.publication.epubcheck_command", lambda: None):
+                return validate_publication_outputs(generated, {"mode": "study"})
+
+    def test_table_shrink_is_a_warning_only_when_an_edition_agrees_on_its_count(self) -> None:
+        # Each edition agrees within itself (and differs from the other): the
+        # master's count is the artifact, not the renders.
+        result = self._table_gate({"docx": 5, "epub": 5, "bilingual_docx": 3, "bilingual_epub": 3}, expected=7)
+        self.assertTrue(result["passed"], result["errors"])
+        self.assertEqual(len([w for w in result["warnings"] if "layout tables" in w]), 4)
+
+    def test_table_shrink_blocks_when_formats_of_an_edition_disagree(self) -> None:
+        # Two formats agreeing does not excuse a third that lost more tables.
+        result = self._table_gate({"docx": 5, "epub": 5, "pdf": 3}, expected=7)
+        self.assertFalse(result["passed"])
+        self.assertEqual(sorted(e.split(":")[0] for e in result["errors"]), ["docx", "epub", "pdf"])
+        # One format keeping every table does not excuse another that lost some.
+        result = self._table_gate({"docx": 7, "epub": 3}, expected=7)
+        self.assertFalse(result["passed"])
+        self.assertEqual([e.split(":")[0] for e in result["errors"]], ["epub"])
+
     def test_docx_toc_is_required_only_when_the_master_requests_it(self) -> None:
         from docx import Document
 
@@ -597,6 +644,71 @@ class ChmImagePromotionTests(unittest.TestCase):
             markdown = "![](assets/original/fig.jpg)"
             self.assertEqual(_restore_promoted_image_assets(project, markdown), 1)
             self.assertEqual((project / "assets" / "original" / "fig.jpg").read_bytes(), b"full-resolution")
+
+
+class RawHtmlHygieneTests(unittest.TestCase):
+    """Container-markup cleanup edits tags only, never prose or code samples."""
+
+    CODE = '```html\n<a href="page.html" role="chapterjump">Next</a>\n<a href="#nowhere">x</a>\n```\n'
+
+    def test_container_page_links_are_flattened_and_other_links_kept(self) -> None:
+        from book_translation_pro.publication import _neutralize_dead_local_anchors as flatten
+
+        self.assertEqual(flatten('See <a href="7485final/LiB0115.html">chapter 2</a>.'), "See chapter 2.")
+        self.assertEqual(flatten('<a href="ch02.xhtml#s1">next</a>'), "next")
+        for kept in ('<a href="https://example.org/a.html">site</a>', '<a href="#ch01">top</a>',
+                     '<a href="assets/big.png"><img src="assets/small.png"/></a>',
+                     '<a href="images/big.png"><img src="images/small.png"/></a>'):
+            self.assertEqual(flatten(kept), kept)
+        self.assertEqual(flatten(self.CODE), self.CODE)
+
+    def test_roles_are_checked_only_on_anchor_tags(self) -> None:
+        from book_translation_pro.publication import _strip_invalid_epub_roles as strip
+
+        self.assertEqual(strip('<a href="#x" role="chapterjump">x</a>'), '<a href="#x">x</a>')
+        for kept in ('<a href="#n1" role="doc-noteref">1</a>', '<aside role="doc-footnote">Note.</aside>',
+                     'Set the user role = "admin" in the config file.'):
+            self.assertEqual(strip(kept), kept)
+        self.assertEqual(strip(self.CODE), self.CODE)
+
+    def test_heading_images_and_anchors_move_below_the_heading(self) -> None:
+        from book_translation_pro.publication import _lift_heading_images as lift
+
+        # A figure set as a heading keeps the figure; the alt text titles it.
+        self.assertEqual(lift("## ![Exhibit 6.1](assets/fig.png)\n\nText.\n"),
+                         "## Exhibit 6.1\n\n![Exhibit 6.1](assets/fig.png)\n\nText.\n")
+        self.assertEqual(lift("## Results ![](assets/chart.png)\n"), "## Results\n\n![](assets/chart.png)\n")
+        icon = '<span class="inlinemediaobject"><img src="i.gif" alt=""/></span>'
+        self.assertEqual(lift(f'## {icon}Teams <span id="citeams"></span>\n'),
+                         f'## Teams\n\n{icon} <span id="citeams"></span>\n')
+        for kept in ("## Plain heading\n", "```bash\n# install ![x](y.png)\n```\n"):
+            self.assertEqual(lift(kept), kept)
+
+    def test_page_links_flatten_only_when_no_target_exists(self) -> None:
+        from book_translation_pro.publication import _neutralize_dead_page_anchors as flatten
+
+        self.assertEqual(flatten('See <a href="#citeams">CI Teams</a>.\n'), "See CI Teams.\n")
+        for kept in ('<span id="ch01"></span>\n\nSee <a href="#ch01">top</a>.\n',
+                     '## Intro {#intro}\n\nSee <a href="#intro">intro</a>.\n',
+                     '## 1.2 Background\n\nSee <a href="#background">above</a>.\n',
+                     '## Notes\n\n## Notes\n\nSee <a href="#notes-1">notes</a>.\n',
+                     '::: {#align-0001 .pair}\nText\n:::\n\n<a href="#align-0001">pair</a>\n'):
+            self.assertEqual(flatten(kept), kept)
+        self.assertEqual(flatten(self.CODE), self.CODE)
+
+    def test_asset_paths_and_note_markers_change_only_in_tags(self) -> None:
+        from book_translation_pro.publication import (
+            _normalize_anchored_footnote_markers,
+            _normalize_asset_paths,
+        )
+
+        self.assertEqual(_normalize_asset_paths('<img src="assets\\fig.png"/>'), '<img src="assets/fig.png"/>')
+        code = '```\nset src="C:\\dir\\file"\n```\n'
+        self.assertEqual(_normalize_asset_paths(code), code)
+        prose = 'The path src="C:\\dir" is quoted in prose.'
+        self.assertEqual(_normalize_asset_paths(prose), prose)
+        marker = 'Text.<sup>[<a href="#ftn.ch01fnt01" id="ch01fnt01">1</a>]</sup>'
+        self.assertEqual(_normalize_anchored_footnote_markers(marker), "Text.^1^")
 
 
 if __name__ == "__main__":

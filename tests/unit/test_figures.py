@@ -166,6 +166,17 @@ class FigureAuditTests(unittest.TestCase):
                         "Figure 3: overview of output"):
             self.assertTrue(_caption_matches(caption), caption)
 
+    def test_source_caption_label_does_not_backtrack_into_a_shorter_number(self) -> None:
+        from book_translation_pro.figures import SOURCE_CAPTION_RE
+
+        # Prose citing Exhibit 2.4 must not read as a caption for Exhibit 2.
+        self.assertIsNone(SOURCE_CAPTION_RE.match("Exhibit 2.4 shows the flow of costs."))
+        for caption, label in (("Exhibit 2.4 The flow of costs", "2.4"), ("Exhibit 2. The flow", "2"),
+                               ("Exhibit 6.1 — 2019 sales", "6.1"), ("Exhibit 2-3 Costs", "2-3")):
+            match = SOURCE_CAPTION_RE.match(caption)
+            self.assertIsNotNone(match, caption)
+            self.assertEqual(match.group(2), label)
+
     def test_long_paragraph_opening_with_a_label_is_prose(self) -> None:
         prose = "图表 1.1 显示了工厂在十年间的产量变化，" + "其中每个工位的记录都由工头在周五晚上核对并汇总到总账中，" * 3
         with tempfile.TemporaryDirectory() as directory:
