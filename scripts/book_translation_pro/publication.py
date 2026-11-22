@@ -70,6 +70,10 @@ LINKED_MARKDOWN_IMAGE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 ANCHOR_TAG_RE = re.compile(r"<a\b(?P<attrs>[^>]*)>(?P<body>(?:(?!<a\b).)*?)</a>", re.IGNORECASE | re.DOTALL)
+# CHM thumbnails carry the viewer's "Click to expand" hint as alt text.  A
+# paragraph holding only an image becomes a figure whose caption is its alt
+# text, so DOCX showed that hint as a line above the real caption.
+PLACEHOLDER_IMAGE_ALT_RE = re.compile(r"!\[\s*(?:click to expand|点击展开)\s*\]\(", re.IGNORECASE)
 HREF_ATTR_RE = re.compile(r"\bhref\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)", re.IGNORECASE | re.DOTALL)
 ID_ATTR_RE = re.compile(r"\bid\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
 # CHM sources mark footnotes as a bracketed superscript anchor pair:
@@ -85,7 +89,7 @@ ANCHORED_NOTE_RE = re.compile(
 # generated edition ships those pages.  Schemes, in-page jumps and asset
 # links do not match.
 _CONTAINER_PAGE_HREF_RE = re.compile(
-    r"^(?![a-zA-Z][a-zA-Z0-9+.\-]*:)[^#?\s]+\.x?html?(?:[#?]\S*)?$", re.IGNORECASE
+    r"^(?![a-zA-Z][a-zA-Z0-9+.\-]*:)[^#?\s]+\.(?:x?html?|zip)(?:[#?]\S*)?$", re.IGNORECASE
 )
 # Role values EPUBCheck accepts on an ``<a href>`` element; source containers
 # carry UI roles such as ``chapterjump`` that fail validation.
@@ -1715,8 +1719,12 @@ def _outside_fences(markdown: str, transform: Callable[[str], str]) -> str:
     return "".join(parts)
 
 
-def _neutralize_dead_local_anchors(markdown: str) -> str:
+def _neutralize_dead_local_anchors(markdown: str, unpromoted_images: bool = False) -> str:
     """Flatten raw anchors that link to a page of the source container.
+
+    ``unpromoted_images`` also flattens an anchor wrapping a shipped image
+    whose href is a container-relative image path the edition does not carry
+    (the bilingual edition never promotes thumbnails to the linked file).
 
     CHM/EPUB extraction carries navigation anchors such as
     ``<a href="7485final/LiB0115.html">…</a>`` that point into the decompiled
@@ -1730,11 +1738,43 @@ def _neutralize_dead_local_anchors(markdown: str) -> str:
         if not href_match:
             return match.group(0)
         href = href_match.group("value").strip().replace("\\", "/")
-        if not _CONTAINER_PAGE_HREF_RE.match(href):
+        if not _CONTAINER_PAGE_HREF_RE.match(href) and not _links_to_its_own_image(
+            href, match.group("body"), unpromoted_images
+        ):
             return match.group(0)
         return match.group("body")
 
     return _outside_fences(markdown, lambda text: ANCHOR_TAG_RE.sub(replace, text))
+
+
+def _links_to_its_own_image(href: str, body: str, unpromoted_images: bool = False) -> bool:
+    """True when an anchor only wraps the image it links to.
+
+    Linked-image promotion swaps a thumbnail for the full-size file the anchor
+    points at, so ``<a href="p/fig.jpg">![](assets/original/p/fig.jpg)</a>``
+    links to what it already shows.  Pandoc ships the image but not the link
+    target, which EPUBCheck reports as a missing resource; the image stays.
+    """
+    image = re.fullmatch(
+        r"""\s*(?:!\[[^\]]*\]\((?P<md>[^)\s]+)[^)]*\)|<img\b[^>]*?\bsrc\s*=\s*["'](?P<tag>[^"']+)["'][^>]*>)\s*""",
+        body, flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not image:
+        return False
+
+    def key(path: str) -> str:
+        return path.replace("\\", "/").lstrip("/").removeprefix("assets/original/").casefold()
+
+    shown = (image.group("md") or image.group("tag")).replace("\\", "/").lstrip("/")
+    if key(href) == key(shown):
+        return True
+    link = href.replace("\\", "/").lstrip("/")
+    return (
+        unpromoted_images
+        and link.casefold().endswith((".jpg", ".jpeg", ".png", ".gif"))
+        and not link.startswith("assets/")
+        and shown.startswith("assets/original/")
+    )
 
 
 def _normalize_asset_paths(markdown: str) -> str:
@@ -1870,6 +1910,10 @@ def clean_markdown_for_publication(markdown: str, continuation: str = "（续表
     text = re.sub(r"<br\s*/?>", "<br/>", text, flags=re.IGNORECASE)
     text = _normalize_sup_markers(text)
     text = _normalize_image_markup(text)
+    # Promotion upgrades a thumbnail to the full-size file its anchor links to,
+    # which leaves an anchor that links to the image it shows.
+    text = _neutralize_dead_local_anchors(text)
+    text = _outside_fences(text, lambda part: PLACEHOLDER_IMAGE_ALT_RE.sub("![](", part))
     # Pandoc drops empty HTML anchors even when another retained link targets
     # them. Convert those image/backlink targets into nonempty semantic spans.
     text = re.sub(
@@ -3047,7 +3091,7 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
         # ill-formed and which the DOCX writer would drop entirely), and
         # in-page links to targets the edition does not carry.
         bilingual_text = _normalize_anchored_footnote_markers(bilingual_text)
-        bilingual_text = _neutralize_dead_local_anchors(bilingual_text)
+        bilingual_text = _neutralize_dead_local_anchors(bilingual_text, unpromoted_images=True)
         bilingual_text = _strip_invalid_epub_roles(bilingual_text)
         bilingual_text = _lift_heading_images(bilingual_text)
         bilingual_text = _convert_html_tables(bilingual_text)

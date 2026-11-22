@@ -11,7 +11,7 @@ from typing import Any
 
 from .artifacts import BTPError, atomic_write_json, atomic_write_text, hash_data, load_json, portable_path, safe_project_path, sha256_file, validate_schema
 from .exceptions import approved_exception_ids
-from .glossary import load_effective_glossary, select_entries, target_matches
+from .glossary import entry_matches, load_effective_glossary, select_entries, target_matches
 from .manifest import load_manifest, validate_manifest_sources
 from .config import config_drifted
 from .state import load_state, now_utc, recorded_dependencies, save_state, unit_dependencies
@@ -530,6 +530,74 @@ def _check_local_resources(project: Path, refs: list[str], checks: list[dict[str
             _check(checks, "assets.missing", "fail", f"Missing local resource: {ref}", unit_id)
 
 
+# Phrases a translator writes when explaining that a figure or table could not
+# be extracted cleanly.  They describe the tooling, not the book, so a reader
+# should never meet them in the translation.
+_TRANSLATOR_NOTE_RE = re.compile(
+    r"(?:原始|源)(?:文字层|文本层)|文字层|OCR\s?(?:碎片|文字|识别|结果)|独立碎片|文字碎片|"
+    r"\b(?:OCR (?:fragments?|text)|text layer)\b|could not be (?:reliably|accurately) (?:reconstructed|recovered)",
+    re.IGNORECASE,
+)
+_SOURCE_TOOLING_RE = re.compile(r"\bOCR\b|text layer|文字层", re.IGNORECASE)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+# A glossary entry missing from this share of the units that mention it is
+# reported even while the entry is unapproved and so not enforced.
+TERM_COVERAGE_WARN_RATIO = 0.3
+TERM_COVERAGE_MIN_UNITS = 3
+
+
+def has_translator_note(source: str, target: str) -> bool:
+    """Whether the target comments on extraction problems the source never mentions."""
+    if _SOURCE_TOOLING_RE.search(source):
+        return False
+    prose = _HTML_COMMENT_RE.sub("", re.sub(r"```.*?```", "", target, flags=re.DOTALL))
+    return bool(_TRANSLATOR_NOTE_RE.search(prose))
+
+
+def _glossary_coverage_checks(
+    checks: list[dict[str, Any]], glossary: dict[str, Any], units: list[tuple[str, str | None, str, str]]
+) -> None:
+    """Report glossary entries the per-unit check cannot enforce.
+
+    ``terminology.approved`` applies only to approved entries whose scopes name
+    a Book Map node of the unit (an empty list means the whole book).  An entry
+    left at ``needs_review``, or scoped to a word such as ``entire-book`` that
+    names no node, is never applied, so drift from it goes unseen.  Say so once
+    for each cause, and name every such entry the target leaves out of a
+    sizeable share of the units that mention it.
+    """
+    known_nodes = {node_id for _, node_id, _, _ in units}
+    entries = [entry for entry in glossary["entries"] if entry["status"] != "rejected"]
+
+    def inert_scope(entry: dict[str, Any]) -> bool:
+        scopes = entry.get("scopes", [])
+        return bool(scopes) and not known_nodes.intersection(scopes)
+
+    unapproved = [entry for entry in entries if entry["status"] != "approved"]
+    if unapproved:
+        _check(checks, "terminology.unapproved", "warn",
+               f"{len(unapproved)} glossary entries are not approved, so the approved-target check does not enforce them")
+    misscoped = [entry for entry in entries if inert_scope(entry)]
+    if misscoped:
+        examples = ", ".join(sorted({scope for entry in misscoped for scope in entry["scopes"]})[:3])
+        _check(checks, "terminology.scope", "warn",
+               f"{len(misscoped)} glossary entries are scoped to no Book Map node ({examples}), so they apply to no unit; "
+               "use an empty scopes list for the whole book")
+    for entry in entries:
+        if entry["status"] == "approved" and not inert_scope(entry):
+            continue
+        scopes = [] if inert_scope(entry) else entry.get("scopes", [])
+        mentioning = [
+            (unit_id, target) for unit_id, node_id, source, target in units
+            if (not scopes or node_id in scopes) and entry_matches(entry, source)
+        ]
+        missing = [unit_id for unit_id, target in mentioning if not target_matches(entry, target)]
+        if len(mentioning) >= TERM_COVERAGE_MIN_UNITS and len(missing) / len(mentioning) > TERM_COVERAGE_WARN_RATIO:
+            _check(checks, "terminology.coverage", "warn",
+                   f"{entry['source']!r} -> {entry['target']!r} is missing from {len(missing)} of {len(mentioning)} "
+                   f"units that mention it (first: {', '.join(missing[:4])}); the entry is not enforced")
+
+
 def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     manifest = load_manifest(project)
     state = load_state(project)
@@ -552,6 +620,7 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     unit_position = {entry["unit_id"]: index for index, entry in enumerate(ordered_units)}
     target_tokens_by_unit: dict[str, Counter[str]] = {}
     source_tokens_by_unit: dict[str, Counter[str]] = {}
+    term_units: list[tuple[str, str | None, str, str]] = []
     for entry in ordered_units:
         source_file = safe_project_path(project, entry["source_file"])
         target_file = _target_path(project, entry, require_edit)
@@ -675,12 +744,18 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         for term in select_entries(glossary, source, entry["book_node_id"]):
             if not target_matches(term, target):
                 _check(checks, "terminology.approved", "fail", f"Approved target missing for {term['source']!r}: {term['target']!r}", unit_id)
+        term_units.append((unit_id, entry["book_node_id"], source, target))
+        if has_translator_note(source, target):
+            _check(checks, "content.translator_note", "warn",
+                   "Target prose comments on extraction or OCR problems; a reader should see the book, not the tooling", unit_id)
 
         draft_path = safe_project_path(project, entry["draft_file"])
         if require_edit and draft_path.is_file():
             recorded_input = record.get("output_hashes", {}).get("edit_input_draft")
             if recorded_input != sha256_file(draft_path):
                 _check(checks, "edit.stale", "fail", "Edited output was not recorded against the current draft", unit_id)
+
+    _glossary_coverage_checks(checks, glossary, term_units)
 
     target_root = project / "target" / ("edited" if require_edit else "draft")
     actual_files = {portable_path(path, project): path for path in target_root.glob("unit-*.md")}

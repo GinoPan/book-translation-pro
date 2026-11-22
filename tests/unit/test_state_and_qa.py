@@ -10,7 +10,14 @@ from book_translation_pro.build import build_outputs
 from book_translation_pro.config import resolve_project, write_yaml
 from book_translation_pro.glossary import empty_glossary, save_glossary
 from book_translation_pro.manifest import create_manifest
-from book_translation_pro.qa import _number_tokens, _urls, run_qa
+from book_translation_pro.qa import (
+    TERM_COVERAGE_MIN_UNITS,
+    _glossary_coverage_checks,
+    _number_tokens,
+    _urls,
+    has_translator_note,
+    run_qa,
+)
 from book_translation_pro.state import (
     dispatch_unit,
     initialize_state,
@@ -312,6 +319,63 @@ class StateTests(unittest.TestCase):
             record_failure(root, "unit-0001", "second", 2)
             queue = plan_run(root, False, 2)
             self.assertIn("attempt_limit_reached:unit-0001", queue["blocked"])
+
+
+class TranslationReaderChecksTests(unittest.TestCase):
+    def test_translator_notes_about_extraction_are_flagged_only_when_the_source_has_none(self) -> None:
+        note = "图表继续列示成本。由于原始文字层按坐标拆散，无法可靠重建每个单元格。"
+        self.assertTrue(has_translator_note("Exhibit 6.6 continued.", note))
+        self.assertTrue(has_translator_note("Exhibit 6.6", "Several cells are OCR fragments here."))
+        # Ordinary prose, including words that merely look similar, is not a note.
+        for prose in ("这些指标会把医生变成只会查看碎片化指标的机械师。", "该系统无法可靠地预测需求。",
+                      "The text is clear and the layer of management is thin."):
+            self.assertFalse(has_translator_note("Source text.", prose), prose)
+        # A book that is itself about OCR or text layers may say so.
+        self.assertFalse(has_translator_note("OCR errors arise in the text layer.", "OCR 碎片和文字层会产生错误。"))
+        # An HTML comment or fenced code never reaches the reader.
+        self.assertFalse(has_translator_note("Source.", "<!-- 本单元仅含 OCR 碎片，已移除。 -->\n\n正文。"))
+        self.assertFalse(has_translator_note("Source.", "```\n原始文字层\n```\n\n正文。"))
+
+    def test_glossary_entries_the_unit_check_cannot_apply_are_reported(self) -> None:
+        def entry(status: str, source: str, target: str, scopes: list[str] | None = None) -> dict:
+            return {"id": source, "source": source, "target": target, "aliases": [], "category": "technical_term",
+                    "status": status, "confidence": "high", "scopes": scopes or [], "evidence": []}
+
+        glossary = {"entries": [
+            entry("needs_review", "balanced scorecard", "平衡计分卡"),
+            entry("needs_review", "box score", "记分卡"),
+            entry("approved", "value stream", "价值流"),
+            # Approved, but scoped to a word that names no Book Map node: applies to no unit.
+            entry("approved", "physical solution", "物理方案", ["entire-book"]),
+            entry("rejected", "muda", "浪费"),
+        ]}
+        text = "The balanced scorecard, the box score, the value stream and the physical solution matter."
+        units = [(f"unit-{n:04d}", "section-0001", text,
+                  "综合记分卡、记分卡、价值流和物理解决方案都很重要。" if n % 2 else "平衡计分卡、记分卡、价值流和物理解决方案都很重要。")
+                 for n in range(1, 2 * TERM_COVERAGE_MIN_UNITS + 1)]
+        checks: list[dict] = []
+        _glossary_coverage_checks(checks, glossary, units)
+        by_id: dict[str, list[str]] = {}
+        for check in checks:
+            by_id.setdefault(check["id"], []).append(check["message"])
+        self.assertTrue(all(check["status"] == "warn" for check in checks))
+        self.assertIn("2 glossary entries are not approved", by_id["terminology.unapproved"][0])
+        self.assertIn("1 glossary entries are scoped to no Book Map node (entire-book)", by_id["terminology.scope"][0])
+        # Half the units render the first term another way; the misscoped entry is ignored by every unit.
+        coverage = by_id["terminology.coverage"]
+        self.assertEqual(len(coverage), 2)
+        self.assertTrue(any("'balanced scorecard'" in message and f"{TERM_COVERAGE_MIN_UNITS} of {2 * TERM_COVERAGE_MIN_UNITS}" in message
+                            for message in coverage))
+        self.assertTrue(any("'physical solution'" in message and f"{2 * TERM_COVERAGE_MIN_UNITS} of {2 * TERM_COVERAGE_MIN_UNITS}" in message
+                            for message in coverage))
+        # Followed entries, approved entries with a real scope, and rejected ones stay silent.
+        self.assertFalse(any("'box score'" in message or "'value stream'" in message or "'muda'" in message for message in coverage))
+        # A fully approved, properly scoped glossary, or too few mentioning units, reports nothing.
+        quiet: list[dict] = []
+        _glossary_coverage_checks(quiet, {"entries": [entry("approved", "box score", "记分卡", ["section-0001"])]}, units)
+        _glossary_coverage_checks(quiet, {"entries": [entry("needs_review", "balanced scorecard", "平衡计分卡")]},
+                                  units[:TERM_COVERAGE_MIN_UNITS - 1])
+        self.assertEqual([check["id"] for check in quiet], ["terminology.unapproved"])
 
 
 if __name__ == "__main__":

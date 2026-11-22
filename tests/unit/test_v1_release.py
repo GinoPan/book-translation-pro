@@ -107,6 +107,36 @@ class V1ContractTests(unittest.TestCase):
         code = render("Run this:\n\n    make all\n    make test", "运行：\n\n    make all\n    make test")
         self.assertIn("\n    make all\n    make test\n", code)
 
+    def test_bilingual_does_not_pair_blocks_that_are_shifted_by_dropped_page_furniture(self) -> None:
+        def render(source: str, target: str) -> str:
+            return render_bilingual_markdown({
+                "schema_version": 1, "source_fingerprint": "a" * 64, "target_language": "zh-Hans",
+                "items": [{
+                    "id": "align-0001", "order": 0, "unit_id": "unit-0001", "book_node_id": None,
+                    "source_segment_ids": ["seg-000001"], "source_text": source, "target_text": target,
+                    "source_sha256": "a" * 64, "target_sha256": "b" * 64,
+                }],
+            })
+
+        first = ("Flow principles and techniques are the key concepts behind designing and executing an "
+                 "effective operation for any product or service focused lean enterprise today.")
+        second = ("The design of lean manufacturing systems and equipment incorporates the essential principles "
+                  "that guide successful lean organizations around the world today.")
+        first_zh = "流动原则和技术，是为任何以产品或服务为重点的精益企业设计和执行有效运营的关键概念，在今天仍然如此。"
+        second_zh = "精益制造系统和设备的设计包含了指导成功精益组织的基本原则，这些原则在世界各地的精益企业中都适用。"
+        # The source carries a running head the translation dropped, so the block
+        # counts match only by coincidence and every pair would be one paragraph off.
+        shifted = render(f"JIM HUNTZINGER\n\n{first}\n\n{second}", f"{first_zh}\n\n{second_zh}\n\n**17**")
+        self.assertEqual(len([line for line in shifted.splitlines() if line.startswith(":::") and "{" in line]), 2)
+        self.assertIn("JIM HUNTZINGER", shifted)
+        # The same unit with a true one-to-one translation is still paired.
+        paired = render(f"{first}\n\n{second}", f"{first_zh}\n\n{second_zh}")
+        self.assertEqual(len([line for line in paired.splitlines() if line.startswith(":::") and "{" in line]), 4)
+        # A number that vanished means the target paragraph is another one.
+        wrong_numbers = render(f"{first} It cost 1,250 dollars and 4,800 hours.\n\n{second}",
+                               f"{second_zh}\n\n{first_zh}")
+        self.assertEqual(len([line for line in wrong_numbers.splitlines() if line.startswith(":::") and "{" in line]), 2)
+
     def test_bilingual_keeps_id_anchors_namespaced_per_language_side(self) -> None:
         def item(order: int, source: str, target: str) -> dict:
             return {
@@ -132,6 +162,38 @@ class V1ContractTests(unittest.TestCase):
         self.assertIn('<a href="#src-ch01">the opening</a>', rendered)
         self.assertIn('<a href="#tgt-ch01">开篇</a>', rendered)
         self.assertNotIn('class="topic"', rendered)
+
+    def test_bilingual_namespaces_ids_on_content_anchors_per_side(self) -> None:
+        def item(order: int, source: str, target: str) -> dict:
+            return {
+                "id": f"align-{order + 1:04d}", "order": order, "unit_id": f"unit-{order + 1:04d}",
+                "book_node_id": None, "source_segment_ids": [f"seg-{order + 1:06d}"],
+                "source_text": source, "target_text": target,
+                "source_sha256": "a" * 64, "target_sha256": "b" * 64,
+            }
+
+        image = '<a href="img/f1.jpg" id="IMG_1" target="_parent"><img src="assets/f1.jpg" alt="{alt}" /></a>'
+        rendered = render_bilingual_markdown({
+            "schema_version": 1, "source_fingerprint": "a" * 64, "target_language": "zh-Hans",
+            "items": [
+                item(0, image.format(alt="Expand") + "\n\nSee [the note](#IMG_1) and <a href=\"#IMG_1\">figure</a>.",
+                     image.format(alt="展开") + "\n\n见<a href=\"#IMG_1\">图</a>。"),
+                # The same id repeating inside one side keeps only its first copy.
+                item(1, image.format(alt="Expand again"), image.format(alt="再次展开")),
+                # Extraction ids are not renamed: strip_extraction_links needs them.
+                item(2, '<a id="calibre_link-7">Kept text</a>', '<a id="calibre_link-7">保留文本</a>'),
+            ],
+        })
+        self.assertEqual(rendered.count('id="src-IMG_1"'), 1)
+        self.assertEqual(rendered.count('id="tgt-IMG_1"'), 1)
+        self.assertNotIn('id="IMG_1"', rendered)
+        # Both repeated images still render; only the duplicate id is gone.
+        self.assertEqual(rendered.count('alt="Expand again"'), 1)
+        self.assertEqual(rendered.count('alt="再次展开"'), 1)
+        self.assertIn('href="#src-IMG_1"', rendered)
+        self.assertIn('href="#tgt-IMG_1"', rendered)
+        self.assertIn("Kept text", rendered)
+        self.assertNotIn("calibre_link", rendered)
 
     def test_project_glossary_overlays_reusable_library(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
