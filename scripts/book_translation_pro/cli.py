@@ -23,6 +23,7 @@ from .publication import publication_table_inventory
 from .publication_review import create_review_template, record_publication_review
 from .qa import run_qa
 from .release import release_check
+from .retrofit import retrofit_exhibits
 from .runtime import doctor_report
 from .runtime_adapters import conformance_cases
 from .state import (
@@ -39,7 +40,7 @@ from .visual import record_visual_review, show_page
 # Every command that reads and rewrites shared project state runs under the
 # project lock so parallel workers cannot overwrite each other's records.
 PROJECT_LOCKED_COMMANDS = frozenset({
-    "prepare", "visualize", "reconstruct-figures", "normalize-images", "plan", "show-unit",
+    "prepare", "visualize", "reconstruct-figures", "retrofit-exhibits", "normalize-images", "plan", "show-unit",
     "record", "qa", "build", "typeset", "publication-review", "migrate",
 })
 
@@ -300,6 +301,18 @@ def build_parser() -> argparse.ArgumentParser:
             keys=[key.strip() for key in args.keys.split(",") if key.strip()] or None,
         )
     )
+
+    p_retrofit = sub.add_parser(
+        "retrofit-exhibits",
+        help="Replace exhibit extraction fragments in prepared source units with figure-label blocks or rebuilt tables",
+    )
+    p_retrofit.add_argument("project")
+    p_retrofit.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the changes; the default only writes analysis/exhibit-retrofit-plan.json",
+    )
+    p_retrofit.set_defaults(handler=lambda args: retrofit_exhibits(_project(args.project), apply=args.apply))
 
     p_normalize_images = sub.add_parser(
         "normalize-images",
