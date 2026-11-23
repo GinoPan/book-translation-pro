@@ -258,6 +258,12 @@ def plan_retrofit(project: Path, units: list[dict[str, Any]], inventory: dict[st
         if exhibit["key"] in already:
             decision.update(status="already_retrofitted")
             continue
+        merged = exhibit.get("checks", {}).get("merged_cells", [])
+        if merged:
+            # Splicing a table whose columns ran together would put a wrong table in the book.
+            decision.update(status="needs_hand_rebuild",
+                            reason=f"rebuilt table has merged cells: {'; '.join(merged[:3])}")
+            continue
         found_caption = _find_caption(units, exhibit, exhibits)
         if found_caption is None:
             decision.update(status="unmatched", reason="caption not found once in the source units")

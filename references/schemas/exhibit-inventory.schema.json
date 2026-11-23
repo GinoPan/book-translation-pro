@@ -80,6 +80,7 @@
               "characters_missing": {"type": "string"},
               "characters_extra": {"type": "string"},
               "numbers": {"type": "integer", "minimum": 0},
+              "merged_cells": {"type": "array", "items": {"type": "string"}},
               "totals": {
                 "type": "array",
                 "items": {

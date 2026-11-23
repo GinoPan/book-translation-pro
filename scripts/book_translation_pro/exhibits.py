@@ -170,6 +170,48 @@ def _columns_from_header(header_lines: list[list[dict[str, Any]]]) -> list[dict[
     return columns
 
 
+def _header_merges_columns(header_lines: list[list[dict[str, Any]]], skeleton: list[dict[str, Any]]) -> bool:
+    """Whether a column built from the headings would sit over two data columns."""
+    return any(
+        sum(_overlap(column["x0"], column["x1"], data["x0"], data["x1"]) > 0 for data in skeleton) >= 2
+        for column in _columns_from_header(header_lines))
+
+
+def _columns_under_skeleton(header_lines: list[list[dict[str, Any]]], skeleton: list[dict[str, Any]]
+                            ) -> tuple[list[dict[str, Any]], list[list[str]]]:
+    """Data columns titled by the heading words over them; a heading over several
+    columns becomes a group heading line instead."""
+    columns = [{"x0": c["x0"], "x1": c["x1"], "parts": []} for c in skeleton]
+    groups: list[list[str]] = []
+    unplaced: list[list[dict[str, Any]]] = []
+    for line in header_lines:
+        spanning, alone = [], []
+        for span in line:
+            r = span["bbox"]
+            overlaps = [(_overlap(c["x0"], c["x1"], r.x0, r.x1), i) for i, c in enumerate(skeleton)]
+            touched = [i for amount, i in overlaps if amount > 0]
+            best_amount, best = max(overlaps)
+            if not touched:
+                alone.append(span)  # a heading over no data (weeks still to come): its own empty column
+            elif len(touched) == 1 or best_amount >= 0.7 * r.width:
+                columns[best]["parts"].append(span)
+            else:
+                spanning.append(span["text"])
+        if spanning:
+            groups.append(spanning)
+        if alone:
+            unplaced.append(alone)
+    for extra in _columns_from_header(unplaced) if unplaced else []:
+        columns.append({"x0": extra["x0"], "x1": extra["x1"], "parts": extra["parts"]})
+    columns.sort(key=lambda c: c["x0"])
+    for column in columns:
+        title = ""
+        for span in sorted(column["parts"], key=lambda s: (s["bbox"].y0, s["bbox"].x0)):
+            title = title + span["text"] if title.endswith("-") else (title + " " + span["text"]).strip()
+        column["title"] = title
+    return columns, groups
+
+
 def _columns_from_gaps(lines: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     """Columns as the runs of x covered by text across all lines (white-space rivers between)."""
     columns: list[dict[str, Any]] = []
@@ -229,8 +271,20 @@ def rebuild_table(lines: list[list[dict[str, Any]]]) -> dict[str, Any] | None:
         while start > 0 and not any(numeric(s["text"]) for s in lines[start - 1]):
             start -= 1
         header_lines, body_lines = lines[start:first], lines[first:]
-        columns = _columns_from_header(header_lines) if header_lines else _columns_from_gaps(body_lines)
-        if header_lines:
+        group_headings: list[list[str]] = []
+        skeleton = _columns_from_gaps([line for line in body_lines if len(line) >= 2])
+        from_skeleton = bool(header_lines) and len(skeleton) >= 3 and _header_merges_columns(header_lines, skeleton)
+        if from_skeleton:
+            # A heading over several columns ("VALUE STREAMS") or a stacked heading
+            # would join the data columns under it: the data rows set the columns,
+            # each heading word goes to the column it sits over, and a heading
+            # spanning columns is kept as a group heading above the table.
+            columns, group_headings = _columns_under_skeleton(header_lines, skeleton)
+        elif header_lines:
+            columns = _columns_from_header(header_lines)
+        else:
+            columns = _columns_from_gaps(body_lines)
+        if header_lines and not from_skeleton:
             # Text under no heading (a row-label column the header leaves blank)
             # gets its own untitled columns rather than joining the nearest heading.
             loose = [[s for s in line if not _column_of(s, columns)[1]] for line in body_lines]
@@ -270,7 +324,7 @@ def rebuild_table(lines: list[list[dict[str, Any]]]) -> dict[str, Any] | None:
         ]
         return {
             "mode": "grid", "header": [c["title"] for c in columns] if header_lines else None,
-            "meta": [[s["text"] for s in line] for line in lines[:start]], "rows": rows, "row_tops": tops,
+            "meta": [[s["text"] for s in line] for line in lines[:start]] + group_headings, "rows": rows, "row_tops": tops,
             "numeric_columns": numeric_columns, "continues": continues,
         }
     header_lines = [line for line in lines if all(s["bold"] for s in line)]
@@ -318,6 +372,14 @@ def _value(text: str) -> tuple[float, bool] | None:
 MISPRINT_MAX_SHARE = 0.25
 
 
+def merged_cells(rows: list[list[str]]) -> list[str]:
+    """Cells holding two numbers side by side: columns the rebuild could not tell
+    apart (a stacked header shifted them).  Characters are all there, structure is not."""
+    # Lines of one cell (a list set with <br>) are judged one by one.
+    return [cell for row in rows for cell in row
+            if any(sum(1 for word in line.split() if numeric(word)) >= 2 for line in cell.split("<br>"))]
+
+
 def table_checks(table: dict[str, Any], region_texts: list[str]) -> dict[str, Any]:
     """Every character of the region is in the table; totals agree with their rows.
 
@@ -335,6 +397,7 @@ def table_checks(table: dict[str, Any], region_texts: list[str]) -> dict[str, An
     }
     if table["mode"] != "grid":
         return report
+    report["merged_cells"] = merged_cells([table["header"] or []] + table["rows"])
     rows = table["rows"]
     total_index = next((i for i, row in enumerate(rows) if any(TOTAL_RE.match(c) for c in row if c)), None)
     if total_index is None:

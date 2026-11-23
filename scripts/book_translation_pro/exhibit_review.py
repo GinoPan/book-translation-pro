@@ -19,6 +19,7 @@ from typing import Any
 
 from .artifacts import BTPError, atomic_write_json, atomic_write_text, hash_data, load_json, safe_project_path, sha256_file, validate_schema
 from .figure_render import RENDER_REPORT, Fonts, diagram_blocks, diagram_render_problems, translated_asset
+from .exhibits import merged_cells
 from .figures import _target_root
 from .manifest import load_manifest
 from .retrofit import exhibit_blocks
@@ -110,6 +111,10 @@ def review_items(project: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
             block = tables[exhibit["key"]][table_index.get(exhibit["key"], 0)]
             table_index[exhibit["key"]] = table_index.get(exhibit["key"], 0) + 1
             item.update(treatment="table", unit_id=block["unit_id"])
+            cells = [[cell.strip() for cell in line.strip().strip("|").split("|")]
+                     for line in block["source"].splitlines() if line.strip().startswith("|")]
+            for cell in merged_cells(cells):
+                item["auto_problems"].append(f"cell holds two numbers (columns ran together): {cell}")
             for total in exhibit.get("checks", {}).get("totals", []):
                 if total["verdict"] == "mismatch" and not item["corrections"]:
                     item["auto_problems"].append(

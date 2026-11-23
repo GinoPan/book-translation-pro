@@ -102,6 +102,34 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual({t["column"]: t["verdict"] for t in exhibit["checks"]["totals"]},
                              {"Amount": "exact", "Share": "exact"})
 
+    def test_a_heading_over_several_columns_does_not_join_them(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "book.pdf"
+            document = fitz.open()
+            page = document.new_page()
+            _body(page, 60)
+            page.insert_text((72, 150), "EXHIBIT 7.4 Plant-wide Income Statement", fontname="hebo", fontsize=9)
+            page.insert_text((215, 166), "VALUE STREAMS", fontname="helv", fontsize=8)   # over Motors and Systems
+            for x, word in ((210, "Motors"), (262, "Systems"), (330, "Later")):           # Later: no data yet
+                page.insert_text((x, 178), word, fontname="helv", fontsize=8)
+            rows = [("Sales", "326,250", "748,894"), ("Material costs", "111,431", "232,774"),
+                    ("Conversion costs", "57,628", "70,406"), ("TOTAL COSTS", "169,059", "303,180")]
+            for n, (label, a, b) in enumerate(rows):
+                y = 192 + 12 * n
+                page.insert_text((80, y), label, fontname="helv", fontsize=8)
+                page.insert_text((210, y), a, fontname="helv", fontsize=8)
+                page.insert_text((262, y), b, fontname="helv", fontsize=8)
+            _body(page, 270)
+            document.save(pdf)
+            document.close()
+            (exhibit,) = build_inventory(pdf)["exhibits"]
+            table = exhibit["table"]
+            self.assertEqual(table["header"], ["", "Motors", "Systems", "Later"])
+            self.assertIn(["VALUE STREAMS"], table["meta"])
+            self.assertEqual(table["rows"][1], ["Material costs", "111,431", "232,774", ""])
+            self.assertEqual(exhibit["checks"]["merged_cells"], [])
+            self.assertEqual(exhibit["checks"]["characters_missing"], "")
+
     def test_section_heading_under_the_table_stays_out_of_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pdf = Path(directory) / "book.pdf"
@@ -551,6 +579,26 @@ class RetrofitTests(unittest.TestCase):
         self.assertNotIn("Amount Material costs", text)
         self.assertIn(PROSE_AFTER, text)
 
+    def test_a_table_whose_columns_ran_together_is_not_spliced_in(self) -> None:
+        from book_translation_pro.exhibits import merged_cells
+        rows = [["Sales", "$326,250", "$748,894 $453,215"], ["ROS", "31.8%", "47.1% 38.8%"]]
+        self.assertEqual(merged_cells(rows), ["$748,894 $453,215", "47.1% 38.8%"])
+        # A label with a number in it, or a cell set on two lines, is not a merged cell.
+        self.assertEqual(merged_cells([["Phase 2 results", "$900,000"], ["2 hours<br>2 days", "4"]]), [])
+        table = {
+            "key": "2.1", "label": "EXHIBIT", "part": 1, "parts": 1, "page": 3, "classification": "table_grid",
+            "orientation": "below_caption", "caption": "EXHIBIT 2.1 Costs", "reason": "rebuilt",
+            "table": {"mode": "grid", "header": ["", "Amount"], "meta": [], "continues": False,
+                      "rows": [["Material costs", "$111,431 $5"], ["TOTAL COSTS", "$111,436"]], "numeric_columns": [1]},
+            "checks": {"characters_missing": "", "characters_extra": "", "numbers": 3, "totals": [],
+                       "merged_cells": ["$111,431 $5"]},
+        }
+        units = _units("\n\n".join(["**EXHIBIT 2.1** **Costs**",
+                                    "Amount Material costs \\$111,431 \\$5 TOTAL COSTS \\$111,436", PROSE_AFTER]) + "\n")
+        (decision,) = self._plan(units, table)
+        self.assertEqual(decision["status"], "needs_hand_rebuild")
+        self.assertIn("$111,431 $5", decision["reason"])
+
     def test_untreated_exhibits_are_left_alone(self) -> None:
         raster = dict(DIAGRAM, classification="raster", reason="embedded picture")
         units = _units("**EXHIBIT 1.1** **Planning Loop**\n\n" + FRAGMENTS + "\n")
@@ -597,6 +645,14 @@ class ExhibitQATests(unittest.TestCase):
         checks: list[dict] = []
         _exhibit_unit_checks(checks, "unit-0001", source, target, {"source_issues": issues or []})
         return [f"{c['id']}: {c['message']}" for c in checks if c["status"] == "fail"]
+
+    def test_leaked_tool_text_is_caught_but_book_text_is_not(self) -> None:
+        from book_translation_pro.qa import TOOL_TEXT_RE
+        leaked = ["*** Add File: work/observations/unit-0201.json", "*** Begin Patch", "  *** Update File: a.md",
+                  '{"schema_version":1,"new_entries":[],"conflicts":[]}']
+        book = ["*** 重要提示 ***", "正文提到 *** Add File: 不在行首", '{"schema_version": 1}', "> 译者注：原书此处印作 3.4%"]
+        self.assertEqual([bool(TOOL_TEXT_RE.match(line)) for line in leaked], [True] * len(leaked))
+        self.assertEqual([bool(TOOL_TEXT_RE.match(line)) for line in book], [False] * len(book))
 
     def test_translated_labels_with_break_marks_pass(self) -> None:
         self.assertEqual(self._fails(LABELS_SOURCE, _labels_target("客户|需求", "FR1", "反馈")), [])

@@ -601,6 +601,14 @@ def _glossary_coverage_checks(
                    f"units that mention it (first: {', '.join(missing[:4])}); the entry is not enforced")
 
 
+# Lines a worker's tooling can leave in an output file: patch envelopes and
+# observation JSON.  None of them is book text.
+TOOL_TEXT_RE = re.compile(
+    r'^\s*(?:\*\*\* (?:Begin Patch|End Patch|Add File:|Update File:|Delete File:|Move to:)'
+    r'|\{"schema_version"\s*:\s*\d+\s*,\s*"(?:new_entries|unit_id|summary)")'
+)
+
+
 # ``source_error_corrected: 3.4% -> 15.2% (exhibit 7.3): rows sum to 15.2%``
 CORRECTION_RE = re.compile(r"^source_error_corrected:\s*(\S+)\s*->\s*(\S+)\s*\(exhibit\s+([^)\s]+)\)\s*:\s*\S")
 _TABLE_ROW_RE = re.compile(r"^\|.*\|\s*$", re.MULTILINE)
@@ -766,7 +774,7 @@ def _exhibit_book_checks(project: Path, config: dict[str, Any], checks: list[dic
     log_path = project / "analysis" / "exhibit-retrofit-log.json"
     if log_path.is_file():
         left = [f"{d['key']}" + (f"/{d['part']}" if d["part"] > 1 else "")
-                for d in load_json(log_path)["decisions"] if d["status"] in {"unmatched", "untouched"}]
+                for d in load_json(log_path)["decisions"] if d["status"] in {"unmatched", "untouched", "needs_hand_rebuild"}]
         if left:
             _check(checks, "exhibit.review", "warn",
                    f"{len(left)} exhibit(s) keep their earlier treatment and need review: {', '.join(left)}")
@@ -924,6 +932,11 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             if not target_matches(term, target):
                 _check(checks, "terminology.approved", "fail", f"Approved target missing for {term['source']!r}: {term['target']!r}", unit_id)
         term_units.append((unit_id, entry["book_node_id"], source, target))
+        leaked = [line.strip()[:80] for line in target.splitlines() if TOOL_TEXT_RE.match(line)]
+        if leaked:
+            _check(checks, "content.tool_text", "fail",
+                   f"Tool output leaked into the translation (it would print in the book): {leaked[0]!r}"
+                   + (f" (+{len(leaked) - 1} more)" if len(leaked) > 1 else ""), unit_id)
         if has_translator_note(source, target):
             _check(checks, "content.translator_note", "warn",
                    "Target prose comments on extraction or OCR problems; a reader should see the book, not the tooling", unit_id)
