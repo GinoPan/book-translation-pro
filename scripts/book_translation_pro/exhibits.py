@@ -407,16 +407,23 @@ def boxes_in(page: Any, crop: Any) -> list[Any]:
     """
     boxes = []
     for drawing in page.get_drawings():
-        rect = drawing["rect"]
-        closed = drawing.get("closePath") or drawing.get("fill") is not None or any(
-            item[0] in ("re", "qu") for item in drawing["items"])
-        upright = all(
-            item[0] in ("re", "qu", "c")
-            or (item[0] == "l" and (abs(item[1].x - item[2].x) < 0.5 or abs(item[1].y - item[2].y) < 0.5))
-            for item in drawing["items"])
-        if (closed and upright and crop.contains(rect) and rect.width > 20 and rect.height > 10
-                and rect.get_area() < 0.5 * crop.get_area()):
-            boxes.append(rect)
+        items = drawing["items"]
+        if len(items) > 1 and all(item[0] in ("re", "qu") for item in items):
+            # One path made of several rectangles (a row of boxes) is several boxes;
+            # its overall rectangle would put every label of the row in one box.
+            rects = [item[1] if item[0] == "re" else item[1].rect for item in items]
+        else:
+            closed = drawing.get("closePath") or drawing.get("fill") is not None or any(
+                item[0] in ("re", "qu") for item in items)
+            upright = all(
+                item[0] in ("re", "qu", "c")
+                or (item[0] == "l" and (abs(item[1].x - item[2].x) < 0.5 or abs(item[1].y - item[2].y) < 0.5))
+                for item in items)
+            rects = [drawing["rect"]] if closed and upright else []
+        for rect in rects:
+            if (crop.contains(rect) and rect.width > 20 and rect.height > 10
+                    and rect.get_area() < 0.5 * crop.get_area()):
+                boxes.append(rect)
     return sorted(boxes, key=lambda r: r.get_area())
 
 

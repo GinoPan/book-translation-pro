@@ -169,6 +169,152 @@ class RenderTests(unittest.TestCase):
             figure_render.render_diagram(self.pdf, stale, self.translations, self.root / "out.png")
 
 
+def _row_box_pdf(path: Path) -> None:
+    """Two stacked labels side by side in one box, an underlined label, a slanted arrow."""
+    document = fitz.open()
+    page = document.new_page()
+    _body(page, 60)
+    page.draw_rect(fitz.Rect(60, 150, 400, 205), color=(0, 0, 0), width=0.8)
+    page.insert_text((70, 170), "Cost", fontname="helv", fontsize=8)
+    page.insert_text((70, 182), "Throughput Time", fontname="helv", fontsize=8)
+    page.insert_text((300, 170), "$900,000", fontname="helv", fontsize=8)
+    page.insert_text((300, 182), "23 minutes", fontname="helv", fontsize=8)
+    page.insert_text((160, 199), "Quality Rates", fontname="helv", fontsize=8)
+    width = fitz.get_text_length("Quality Rates", fontname="helv", fontsize=8)
+    page.draw_line((160, 200.5), (160 + width, 200.5), color=(0, 0, 0), width=0.4)
+    page.draw_line((300, 230), (380, 260), color=(0, 0, 0), width=0.8)
+    page.insert_text((72, 290), "EXHIBIT 2.4 Comparison", fontname="hebo", fontsize=9)
+    _body(page, 390)
+    document.save(path)
+    document.close()
+
+
+class RendererRuleTests(unittest.TestCase):
+    """The placement rules, each with the look-alike it must leave alone."""
+
+    def test_a_path_of_several_rectangles_is_several_boxes(self) -> None:
+        document = fitz.open()
+        page = document.new_page()
+        shape = page.new_shape()
+        shape.draw_rect(fitz.Rect(100, 100, 160, 120))
+        shape.draw_rect(fitz.Rect(200, 100, 260, 120))
+        shape.finish(color=(0, 0, 0), width=0.8)
+        shape.commit()
+        boxes = boxes_in(page, fitz.Rect(50, 50, 400, 300))
+        self.assertEqual(sorted(tuple(round(v) for v in b) for b in boxes),
+                         [(100, 100, 160, 120), (200, 100, 260, 120)])
+
+    def test_a_curve_is_followed_not_cut_by_its_chord(self) -> None:
+        document = fitz.open()
+        page = document.new_page()
+        page.draw_circle((200, 200), 50, color=(0, 0, 0), width=0.8)
+        pieces, _masks, _cover = figure_render.line_art(page, fitz.Rect(100, 100, 300, 300))
+        distances = [abs(p - fitz.Point(200, 200)) for a, b, _o in pieces for p in (a, b, (a + b) / 2)]
+        self.assertGreater(min(distances), 49.0)
+        # A label inside the circle does not touch it.
+        points = figure_render.visible_points(figure_render.line_art(page, fitz.Rect(100, 100, 300, 300)))
+        self.assertFalse(figure_render.hits(fitz.Rect(170, 190, 230, 210), points))
+
+    def test_a_filled_shape_hides_the_line_under_it_and_a_white_background_is_not_a_line(self) -> None:
+        document = fitz.open()
+        page = document.new_page()
+        page.draw_rect(fitz.Rect(40, 40, 400, 400), color=None, fill=(1, 1, 1), width=0)  # page panel
+        page.draw_line((50, 200), (350, 200), color=(0, 0, 0), width=0.8)
+        page.draw_rect(fitz.Rect(150, 190, 250, 210), color=(0, 0, 0), fill=(0.8, 0.8, 0.8), width=0.8)
+        points = figure_render.visible_points(figure_render.line_art(page, fitz.Rect(30, 30, 410, 410)))
+        self.assertFalse(figure_render.hits(fitz.Rect(160, 195, 240, 205), points))   # under the box
+        self.assertTrue(figure_render.hits(fitz.Rect(60, 195, 140, 205), points))     # the line itself
+        self.assertFalse(figure_render.hits(fitz.Rect(38, 100, 45, 300), points))     # panel edge
+
+    def test_forced_breaks_bullets_and_lists(self) -> None:
+        self.assertEqual(figure_render.break_units("成本||吞吐时间"), ["成本", "\n", "吞吐时间"])
+        self.assertEqual(figure_render.break_units("• 股东价值|• 结果导向"), ["• 股东价值", "• 结果导向"])
+        self.assertEqual(figure_render.list_breaks(["• Customer value", "• Results"], "• 客户价值|• 结果导向"),
+                         "• 客户价值||• 结果导向")
+        # Not a bulleted list in the source: left as the translator marked it.
+        self.assertEqual(figure_render.list_breaks(["Customer value •", "Results"], "客户价值|• 结果"), "客户价值|• 结果")
+
+    def test_balanced_lines_match_trying_every_split(self) -> None:
+        from itertools import combinations
+        try:
+            font = fitz.Font(fontfile=figure_render.font_files()[0])
+        except BTPError:
+            self.skipTest("no CJK font installed")
+        units = figure_render.break_units("再实施 PS2。|PS1 将 FR1 实现到目标水平。|FR2 随 PS1 而变化。|PS2 将 FR2 实现到目标水平。")
+        for count, lines in enumerate(figure_render._balanced(units, 10 ** 6, font, 9), 1):
+            brute = min(max(font.text_length(figure_render.joined(units[b[i]:b[i + 1]]), 9) for i in range(count))
+                        for cuts in combinations(range(1, len(units)), count - 1) for b in [(0, *cuts, len(units))])
+            self.assertAlmostEqual(max(font.text_length(line, 9) for line in lines), brute, places=3)
+
+    def test_underline_goes_with_its_words_but_a_rule_or_box_edge_stays(self) -> None:
+        line = {"bbox": fitz.Rect(70, 233, 120, 242), "size": 8}
+        group = {"lines": [line]}
+        P = fitz.Point
+        underline = (P(70, 241.5), P(119, 241.5), 3)
+        box_edge = (P(60, 242), P(400, 242), 4)     # runs past the words
+        stem = (P(90, 230), P(90, 250), 5)          # vertical
+        shaft_end = (P(94, 241.5), P(96.2, 241.5), 6)  # the top of an arrow shaft starting under the words
+        found = figure_render.underlines_of(group, [underline, box_edge, stem, shaft_end])
+        self.assertEqual([(round(r.x0), round(r.x1)) for r in found], [(70, 119)])
+
+    def test_a_knockout_hides_an_earlier_line_but_a_box_background_does_not(self) -> None:
+        P = fitz.Point
+        group = {"bbox": fitz.Rect(100, 100, 140, 108), "size": 8}
+        arrow = (P(80, 104), P(160, 104), 1)                       # drawn first
+        patch = (fitz.Rect(98, 99, 142, 109), 2)                   # white patch over it
+        background = (fitz.Rect(97, 98, 143, 110), 5)              # white box fill ...
+        edges = [(P(97, 98), P(143, 98), 6), (P(97, 110), P(143, 110), 6)]  # ... edged after it
+        self.assertEqual(figure_render.knockouts_of(group, [patch], [arrow]), [patch[0]])
+        self.assertEqual(figure_render.knockouts_of(group, [background], [arrow] + edges), [])
+
+    def test_drawn_ink_stays_inside_the_boxes_placement_checks(self) -> None:
+        try:
+            fonts = figure_render.Fonts()
+        except BTPError:
+            self.skipTest("no CJK font installed")
+        document = fitz.open()
+        page = document.new_page(width=300, height=200)
+        page.insert_font(fontname="zh", fontfile=fonts.files["zh"])
+        size, top, lines = 9.0, 50.0, ["测试字样", "管理会计", "精益思维", "价值流", "系统有效性"]
+        boxes = figure_render.ink_boxes(lines, fitz.Rect(20, 0, 280, 200), top, size, fitz.TEXT_ALIGN_LEFT,
+                                        fonts.objects["zh"])
+        figure_render.set_lines(page, lines, boxes, "zh", size, (0, 0, 0), fonts)
+        scale = 8
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace=fitz.csGRAY, alpha=False)
+        rows = [y for y in range(pix.height) if min(pix.samples[y * pix.stride: y * pix.stride + pix.width]) < 128]
+        # Five lines down, the last line's ink still ends inside its modelled box.
+        self.assertGreaterEqual(rows[0] / scale, boxes[0].y0)
+        self.assertLessEqual((rows[-1] + 1) / scale, boxes[-1].y1)
+
+    def test_the_picture_stops_short_of_its_caption(self) -> None:
+        crop = fitz.Rect(50, 100, 400, 300)
+        above = figure_render.picture_area(crop, fitz.Rect(55, 104, 300, 113))
+        self.assertEqual(round(above.y0), 114)
+        below = figure_render.picture_area(crop, fitz.Rect(55, 290, 300, 299))
+        self.assertEqual(round(below.y1), 289)
+        outside = figure_render.picture_area(crop, fitz.Rect(55, 310, 300, 319))
+        self.assertEqual(outside, crop)
+
+    def test_side_by_side_labels_stay_in_their_own_column_and_underlines_go(self) -> None:
+        try:
+            figure_render.font_files()
+        except BTPError:
+            self.skipTest("no CJK font installed")
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "book.pdf"
+            _row_box_pdf(pdf)
+            (exhibit,) = build_inventory(pdf)["exhibits"]
+            self.assertEqual(exhibit["classification"], "diagram")
+            names = {"Cost Throughput Time": "成本||吞吐时间", "$900,000 23 minutes": "$900,000||23 分钟",
+                     "Quality Rates": "质量比率"}
+            report = figure_render.render_diagram(pdf, exhibit, [names[l["text"]] for l in exhibit["labels"]],
+                                                  Path(directory) / "out.png")
+            self.assertTrue(report["passed"], report["problems"])
+            rows = {row["target"]: row for row in report["rows"]}
+            self.assertEqual(rows["成本吞吐时间"]["lines"], 2)
+            self.assertEqual(report["patches"]["underlines_removed"], 1)
+
+
 def _units(*texts: str) -> list[dict]:
     return [{"id": f"unit-{n:04d}", "text": text, "lines": text.split("\n")} for n, text in enumerate(texts, 1)]
 

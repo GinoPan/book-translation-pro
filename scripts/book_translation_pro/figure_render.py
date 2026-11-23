@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import math
 import re
-from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +31,8 @@ MIN_SCALE = 0.6           # smallest font size, relative to the source label
 LINE_HEIGHT = 1.15
 ROW_CLEARANCE = 0.25      # space kept between stacked rows, in font sizes
 RENDER_DPI = 250
+CURVE_STEPS = 8           # straight pieces per Bézier curve
+INK_MARGIN = 0.05         # glyph ink beyond the em box, in font sizes
 _NO_LINE_START = set("，、。：；）」』》,.:;)")
 
 
@@ -57,27 +58,36 @@ class Fonts:
         self.objects = {name: fitz.Font(fontfile=path) for name, path in self.files.items()}
         self._top: dict[str, float] = {}
 
-    def top_offset(self, name: str) -> float:
-        """Per point of size, from a text box's top to its first line's em-box top (measured once)."""
+    def baseline(self, name: str) -> float:
+        """Per point of size, from a line's em-box top to its baseline, chosen so the glyphs'
+        ink is centred on the em box placement assumes (measured once from rendered ink)."""
         if name not in self._top:
             fitz = _fitz()
             scratch = fitz.open()
-            page = scratch.new_page()
+            page = scratch.new_page(width=200, height=120)
             page.insert_font(fontname=name, fontfile=self.files[name])
-            size, y0 = 10.0, 100.0
-            page.insert_textbox(fitz.Rect(50, y0, 300, y0 + 40), "测试字样", fontname=name, fontsize=size,
-                                lineheight=LINE_HEIGHT)
-            line = fitz.Rect(page.get_text("dict")["blocks"][0]["lines"][0]["bbox"])
-            self._top[name] = ((line.y0 + line.y1) / 2 - size / 2 - y0) / size
+            size, base = 40.0, 70.0
+            page.insert_text((10, base), "测试字样", fontname=name, fontsize=size)
+            scale = 4
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace=fitz.csGRAY, alpha=False)
+            rows = [y for y in range(pix.height)
+                    if min(pix.samples[y * pix.stride: y * pix.stride + pix.width]) < 128]
+            if not rows:
+                raise BTPError(f"Font {self.files[name]} drew no ink while measuring its placement")
+            ink_middle = (rows[0] + rows[-1] + 1) / 2 / scale
+            self._top[name] = (base - ink_middle) / size + 0.5
         return self._top[name]
 
 
 # --- line art --------------------------------------------------------------------------
 
-def line_art(page: Any, crop: Any) -> tuple[list[tuple[Any, Any, int]], list[tuple[Any, int]]]:
-    """Straight pieces of line art (with paint order) and the white patches drawn over them."""
+def line_art(page: Any, crop: Any) -> tuple[list[tuple[Any, Any, int]], list[tuple[Any, int]], list[tuple[Any, int]]]:
+    """Straight pieces of line art (with paint order), the white patches drawn over
+    them, and the other filled shapes (a shaded box hides the lines painted before it)."""
+    fitz = _fitz()
     pieces: list[tuple[Any, Any, int]] = []
     masks: list[tuple[Any, int]] = []
+    cover: list[tuple[Any, int]] = []
     for drawing in page.get_drawings():
         rect = drawing["rect"]
         # A horizontal or vertical line has an empty rect, which intersects nothing.
@@ -88,11 +98,19 @@ def line_art(page: Any, crop: Any) -> tuple[list[tuple[Any, Any, int]], list[tup
         if fill and min(fill) > 0.97 and rect.get_area() < 0.5 * crop.get_area():
             masks.append((rect, drawing["seqno"]))
             continue
+        if fill and min(fill) > 0.97 and drawing.get("type") == "f":
+            continue  # a white page or panel background: no visible edge
+        if fill and rect.get_area() < 0.5 * crop.get_area():
+            cover.append((rect, drawing["seqno"]))
         for item in drawing["items"]:
             if item[0] == "l":
                 ends = [(item[1], item[2])]
             elif item[0] == "c":
-                ends = [(item[1], item[4])]
+                # Follow the curve: its chord would cut through a circle's middle.
+                p0, c1, c2, p3 = item[1], item[2], item[3], item[4]
+                points = [p0 * (1 - t) ** 3 + c1 * 3 * (1 - t) ** 2 * t + c2 * 3 * (1 - t) * t ** 2 + p3 * t ** 3
+                          for t in (i / CURVE_STEPS for i in range(CURVE_STEPS + 1))]
+                ends = list(zip(points, points[1:]))
             elif item[0] == "re":
                 r = item[1]
                 ends = [(r.tl, r.tr), (r.tr, r.br), (r.br, r.bl), (r.bl, r.tl)]
@@ -101,8 +119,10 @@ def line_art(page: Any, crop: Any) -> tuple[list[tuple[Any, Any, int]], list[tup
                 ends = [(q.ul, q.ur), (q.ur, q.lr), (q.lr, q.ll), (q.ll, q.ul)]
             else:
                 ends = []
-            pieces += [(a, b, drawing["seqno"]) for a, b in ends]
-    return pieces, masks
+            pieces += [(a, b, drawing["seqno"]) for a, b in ends
+                       if crop.intersects(fitz.Rect(min(a.x, b.x) - pad, min(a.y, b.y) - pad,
+                                                    max(a.x, b.x) + pad, max(a.y, b.y) + pad))]
+    return pieces, masks, cover
 
 
 def _samples(a: Any, b: Any, step: float = 2.0) -> list[Any]:
@@ -113,14 +133,75 @@ def _samples(a: Any, b: Any, step: float = 2.0) -> list[Any]:
     return [fitz.Point(a.x + (b.x - a.x) * t / count, a.y + (b.y - a.y) * t / count) for t in range(count + 1)]
 
 
-def hits(rect: Any, art: tuple[list[Any], list[Any]]) -> bool:
-    """Whether visible line art passes through the rectangle."""
-    pieces, masks = art
+GRID = 16.0  # cell size, in points, of the spatial indexes below
+
+
+def _cells(rect: Any) -> list[tuple[int, int]]:
+    return [(i, j) for i in range(math.floor(rect.x0 / GRID), math.floor(rect.x1 / GRID) + 1)
+            for j in range(math.floor(rect.y0 / GRID), math.floor(rect.y1 / GRID) + 1)]
+
+
+class PointGrid:
+    """Points bucketed by cell, so a rectangle is tested only against points near it
+    (a detailed drawing has tens of thousands)."""
+
+    def __init__(self, points: list[Any]) -> None:
+        self.points = points
+        self.cells: dict[tuple[int, int], list[Any]] = {}
+        for point in points:
+            self.cells.setdefault((math.floor(point.x / GRID), math.floor(point.y / GRID)), []).append(point)
+
+    def __iter__(self) -> Any:
+        return iter(self.points)
+
+    def __len__(self) -> int:
+        return len(self.points)
+
+    def within(self, rect: Any) -> bool:
+        return any(rect.contains(point) for cell in _cells(rect) for point in self.cells.get(cell, ()))
+
+
+def visible_points(art: tuple[list[Any], ...]) -> PointGrid:
+    """Sample points of the line art not hidden under a later white patch or filled
+    shape (computed once per page state: placement tests every candidate against them)."""
+    pieces, *hiders = art
+    # Plain numbers, not fitz objects: this runs for every sample point of the drawing.
+    by_cell: dict[tuple[int, int], list[tuple[float, float, float, float, int]]] = {}
+    for group in hiders:
+        for shape, seq in group:
+            for cell in _cells(shape):
+                by_cell.setdefault(cell, []).append((shape.x0, shape.y0, shape.x1, shape.y1, seq))
+    visible = []
     for a, b, order in pieces:
         for point in _samples(a, b):
-            if rect.contains(point) and not any(mask.contains(point) and seq > order for mask, seq in masks):
-                return True
-    return False
+            x, y = point.x, point.y
+            near = by_cell.get((math.floor(x / GRID), math.floor(y / GRID)), ())
+            if not any(seq > order and x0 <= x <= x1 and y0 <= y <= y1 for x0, y0, x1, y1, seq in near):
+                visible.append(point)
+    return PointGrid(visible)
+
+
+def hits(rect: Any, points: PointGrid) -> bool:
+    """Whether visible line art passes through the rectangle."""
+    return points.within(rect)
+
+
+def underlines_of(group: dict[str, Any], pieces: list[tuple[Any, Any, int]]) -> list[Any]:
+    """Horizontal pieces lying under this label's own lines (an underlined word or
+    heading): they belong to the text and go with it.  A box edge or a rule runs past
+    the text it sits under, so it is never taken."""
+    found = []
+    for line in group["lines"]:
+        box, size = line["bbox"], line["size"]
+        zone_x0, zone_x1 = box.x0 - 1.0, box.x1 + 1.0
+        zone_y0, zone_y1 = box.y1 - 0.35 * size, box.y1 + 0.4 * size
+        for a, b, _order in pieces:
+            if (abs(a.y - b.y) < 0.3 and zone_y0 <= a.y <= zone_y1
+                    and zone_x0 <= min(a.x, b.x) and max(a.x, b.x) <= zone_x1
+                    # an underline spans at least a word; an arrow shaft's end does not
+                    and abs(a.x - b.x) >= 1.5 * size):
+                found.append(_fitz().Rect(min(a.x, b.x), a.y, max(a.x, b.x), a.y))
+    return found
 
 
 def hidden_points(pieces: list[Any], masks: list[tuple[Any, int]]) -> list[Any]:
@@ -129,11 +210,32 @@ def hidden_points(pieces: list[Any], masks: list[tuple[Any, int]]) -> list[Any]:
             if any(mask.contains(point) and seq > order for mask, seq in masks)]
 
 
-def knockouts_of(group: dict[str, Any], masks: list[tuple[Any, int]]) -> list[Any]:
-    """White patches laid behind this label; a box's white background is larger than the label."""
+def _edged(rect: Any, seq: int, pieces: list[tuple[Any, Any, int]]) -> bool:
+    """Whether lines drawn after this white shape run along its edges: a box with a
+    white background, not a patch cut behind a label."""
+    def on_edge(a: Any, b: Any) -> bool:
+        horizontal = abs(a.y - b.y) < 0.3 and min(abs(a.y - rect.y0), abs(a.y - rect.y1)) < 0.6
+        vertical = abs(a.x - b.x) < 0.3 and min(abs(a.x - rect.x0), abs(a.x - rect.x1)) < 0.6
+        long_enough = abs(b - a) > 0.5 * min(rect.width, rect.height)
+        return (horizontal or vertical) and long_enough
+    return any(order > seq and on_edge(a, b) for a, b, order in pieces)
+
+
+def knockouts_of(group: dict[str, Any], masks: list[tuple[Any, int]], pieces: list[tuple[Any, Any, int]]) -> list[Any]:
+    """White patches laid behind this label to cut a line it crosses.  A patch that
+    hides no earlier line (a box's white background, edged after it) is not one."""
     size = group["size"]
     zone = group["bbox"] + (-0.8 * size, -0.8 * size, 0.8 * size, 0.8 * size)
-    return [rect for rect, _seq in masks if zone.contains(rect)]
+    found = []
+    for rect, seq in masks:
+        if not zone.contains(rect) or _edged(rect, seq, pieces):
+            continue
+        inner = rect + (0.3, 0.3, -0.3, -0.3)
+        under = [(a, b) for a, b, order in pieces if order < seq
+                 and inner.intersects(_fitz().Rect(min(a.x, b.x) - 0.5, min(a.y, b.y) - 0.5, max(a.x, b.x) + 0.5, max(a.y, b.y) + 0.5))]
+        if any(inner.contains(point) for a, b in under for point in _samples(a, b, step=0.5)):
+            found.append(rect)
+    return found
 
 
 def remove_patches(page: Any, rects: list[Any]) -> tuple[list[Any], list[Any]]:
@@ -177,44 +279,83 @@ def alignment(group: dict[str, Any], groups: list[dict[str, Any]], boxes: list[A
     return fitz.TEXT_ALIGN_LEFT
 
 
-def candidate_rects(group: dict[str, Any], groups: list[dict[str, Any]], boxes: list[Any], crop: Any) -> list[Any]:
+def candidate_rects(group: dict[str, Any], groups: list[dict[str, Any]], boxes: list[Any], crop: Any,
+                    align: int) -> list[Any]:
     """Where the translation may go, most faithful first.
 
-    In a box: its inner width, vertically halfway to its neighbours in the box, clear
-    of the box edges (Chinese glyphs fill the em box).  A loose label: its own
-    footprint, then one more line of height, then a little more width.
+    In a box: its inner width, vertically halfway to its neighbours in the box and
+    horizontally halfway to labels beside it, clear of the box edges (Chinese glyphs
+    fill the em box); a left-set label keeps its own left edge, a centred one stays
+    centred on itself.  Then, as for a loose label: its own footprint, then one more
+    line of height, then a little more width.
     """
     fitz = _fitz()
     b, size = group["bbox"], group["size"]
-    if group["box"] is not None:
-        box = boxes[group["box"]]
-        same = [g for g in groups if g is not group and g["box"] == group["box"]]
-        above = [(g["bbox"].y1 + b.y0) / 2 for g in same if g["bbox"].y1 <= b.y0 + 0.5]
-        below = [(g["bbox"].y0 + b.y1) / 2 for g in same if g["bbox"].y0 >= b.y1 - 0.5]
-        y0 = max(above + [box.y0 + 0.3 * size])
-        y1 = min(below + [box.y1 - 0.3 * size])
-        return [fitz.Rect(box.x0 + 2.5, y0, box.x1 - 2.5, y1) & crop]
     pad = 0.15 * size
     footprint = fitz.Rect(b.x0 - pad, b.y0 - pad, b.x1 + pad, b.y1 + pad)
     taller = fitz.Rect(footprint.x0, footprint.y0 - 0.6 * size, footprint.x1, footprint.y1 + 0.6 * size)
     wider = fitz.Rect(taller.x0, taller.y0, taller.x1 + 0.25 * b.width, taller.y1)
-    return [footprint & crop, taller & crop, wider & crop]
+    loose = [footprint & crop, taller & crop, wider & crop]
+    if align == fitz.TEXT_ALIGN_LEFT:
+        # Left-set text starts where the source text started (often right at a rule).
+        for rect in loose:
+            rect.x0 = max(rect.x0, b.x0)
+    if group["box"] is None:
+        return loose
+    box = boxes[group["box"]]
+    same = [g for g in groups if g is not group and g["box"] == group["box"]]
+    beside = [g for g in same if g["bbox"].y0 < b.y1 - 0.5 and g["bbox"].y1 > b.y0 + 0.5]
+    above = [(g["bbox"].y1 + b.y0) / 2 for g in same if g not in beside and g["bbox"].y1 <= b.y0 + 0.5]
+    below = [(g["bbox"].y0 + b.y1) / 2 for g in same if g not in beside and g["bbox"].y0 >= b.y1 - 0.5]
+    left = [(g["bbox"].x1 + b.x0) / 2 for g in beside if g["bbox"].x1 <= b.x0 + 0.5]
+    right = [(g["bbox"].x0 + b.x1) / 2 for g in beside if g["bbox"].x0 >= b.x1 - 0.5]
+    y0 = max(above + [box.y0 + 0.3 * size])
+    y1 = min(below + [box.y1 - 0.3 * size])
+    x0 = max(left + [box.x0 + 2.5])
+    x1 = min(right + [box.x1 - 2.5])
+    if align == fitz.TEXT_ALIGN_LEFT:
+        x0 = max(x0, b.x0)
+    elif left or right:
+        middle = (b.x0 + b.x1) / 2
+        half = min(middle - x0, x1 - middle)
+        x0, x1 = middle - half, middle + half
+    return [fitz.Rect(x0, y0, x1, y1) & crop] + loose
+
+
+BULLET = "•"
 
 
 def break_units(text: str) -> list[str]:
-    """Unbreakable pieces: the translator marks allowed breaks with "|"; "\\n" forces one;
-    a space allows one; closing punctuation stays with the text it closes."""
+    """Unbreakable pieces: the translator marks allowed breaks with "|" and forced ones
+    with "||" ("\\n" forces one too); a space allows one; closing punctuation stays with
+    the text it closes, and a bullet with the item it opens."""
     units: list[str] = []
-    for part in re.split(r"(\n)", text):
-        if part == "\n":
+    for part in re.split(r"(\n|\|\|)", text):
+        if part in ("\n", "||"):
             units.append("\n")
             continue
         for piece in re.split(r"\|| (?=\S)", part):
             if piece and units and units[-1] != "\n" and piece[0] in _NO_LINE_START:
                 units[-1] += piece
+            elif piece and units and units[-1] == BULLET:
+                units[-1] = f"{BULLET} {piece}"
             elif piece:
                 units.append(piece)
     return units
+
+
+def list_breaks(source_lines: list[str], translation: str) -> str:
+    """A source label set as a bulleted list, one item per line, keeps one item per
+    line: a forced break goes before every bullet but the first."""
+    if sum(1 for line in source_lines if line.lstrip().startswith(BULLET)) < 2:
+        return translation
+    head, *items = translation.split(BULLET)
+    if not items:
+        return translation
+    rebuilt = head + BULLET + items[0]
+    for item in items[1:]:
+        rebuilt = rebuilt.rstrip("|").rstrip() + "||" + BULLET + item
+    return rebuilt
 
 
 def joined(units: list[str]) -> str:
@@ -230,26 +371,48 @@ def arrangements(text: str, width: float, font: Any, size: float) -> list[list[s
     """Ways to set the text on 1..n lines within the width, fewest lines first, each balanced."""
     units = break_units(text)
     if "\n" in units:
-        lines, current = [], []
+        # Forced lines; each one may still wrap at its own break marks, as few times as fits.
+        segments, current = [], []
         for unit in units + ["\n"]:
             if unit == "\n":
-                lines.append(current)
+                if current:
+                    segments.append(current)
                 current = []
             else:
                 current.append(unit)
-        options = [lines]
-    else:
-        options = []
-        n = len(units)
-        for count in range(1, min(n, 6) + 1):
-            best = None
-            for cuts in combinations(range(1, n), count - 1):
-                bounds = (0, *cuts, n)
-                lines = [units[bounds[i]:bounds[i + 1]] for i in range(count)]
-                longest = max(font.text_length(joined(line), size) for line in lines)
-                if best is None or longest < best[0]:
-                    best = (longest, lines)
-            options.append(best[1])
+        lines: list[str] = []
+        for segment in segments:
+            fitting = _balanced(segment, width, font, size)
+            if not fitting:
+                return []
+            lines += fitting[0]
+        return [lines]
+    return _balanced(units, width, font, size)
+
+
+def _balanced(units: list[str], width: float, font: Any, size: float) -> list[list[str]]:
+    """For each line count (1..6), the split whose longest line is shortest."""
+    n = len(units)
+    unit_width = [font.text_length(unit, size) for unit in units]
+    space = font.text_length(" ", size)
+    # gap[i]: the space joined() sets before unit i when it follows unit i-1 on a line.
+    gap = [0.0] + [space if (re.match(r"[A-Za-z0-9(]", units[i][0]) or re.search(r"[A-Za-z0-9)]$", units[i - 1]))
+                   else 0.0 for i in range(1, n)]
+
+    def line_width(i: int, j: int) -> float:  # units i..j-1 on one line
+        return sum(unit_width[i:j]) + sum(gap[i + 1:j])
+
+    options = []
+    # best[k][j]: (longest line, cut positions) setting units[:j] on k lines.
+    best: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {(0, 0): (0.0, ())}
+    for count in range(1, min(n, 6) + 1):
+        for j in range(count, n + 1):
+            candidates = [(max(best[count - 1, i][0], line_width(i, j)), best[count - 1, i][1] + (i,))
+                          for i in range(count - 1, j) if (count - 1, i) in best]
+            best[count, j] = min(candidates)
+        cuts = best[count, n][1][1:] + (n,)
+        bounds = (0, *cuts)
+        options.append([units[bounds[k]:bounds[k + 1]] for k in range(count)])
     result = []
     for lines in options:
         texts = [joined(line) for line in lines]
@@ -265,7 +428,8 @@ def ink_boxes(lines: list[str], rect: Any, top: float, size: float, align: int, 
         width = font.text_length(line, size)
         x0 = rect.x0 + (rect.width - width) / 2 if align == fitz.TEXT_ALIGN_CENTER else rect.x0
         y = top + index * size * LINE_HEIGHT
-        boxes.append(fitz.Rect(x0, y, x0 + width, y + size))
+        # CJK ink runs a little past the em box; the margin keeps it off a nearby rule.
+        boxes.append(fitz.Rect(x0, y - INK_MARGIN * size, x0 + width, y + size + INK_MARGIN * size))
     return boxes
 
 
@@ -273,15 +437,18 @@ def ink_height(count: int, size: float) -> float:
     return (count - 1) * size * LINE_HEIGHT + size
 
 
-def choose(group: dict[str, Any], translation: str, rects: list[Any], align: int, art: Any, font: Any,
-           knockout: bool, max_size: float | None = None) -> dict[str, Any]:
-    """Score every rectangle, size and arrangement; returns the best placement or a failure."""
+def choose(group: dict[str, Any], translation: str, rects: list[Any], align: int, points: list[Any], font: Any,
+           knockout: bool, others: list[Any], max_size: float | None = None) -> dict[str, Any]:
+    """Score every rectangle, size and arrangement; returns the best placement or a failure.
+
+    ``others`` are the footprints of the other labels: a placement that runs into one
+    is taken only when nothing else fits, and is then reported."""
     floor = round(group["size"] * MIN_SCALE, 2)
     center = (group["bbox"].y0 + group["bbox"].y1) / 2
     # A label whose source cut the lines it crossed (knockout) may cross them again and
     # gets a new cut; one that simply sat on a line (a fishbone tick) may cross it too.
     source_crosses = knockout or any(
-        hits(l["bbox"] + (0.3, 0.25 * l["size"], -0.3, -0.25 * l["size"]), art) for l in group["lines"])
+        hits(l["bbox"] + (0.3, 0.25 * l["size"], -0.3, -0.25 * l["size"]), points) for l in group["lines"])
     best = None
     size = min(group["size"], max_size or group["size"])
     while size >= floor - 1e-6:
@@ -291,17 +458,41 @@ def choose(group: dict[str, Any], translation: str, rects: list[Any], align: int
                 if height + ROW_CLEARANCE * size > rect.height + 0.01:
                     continue
                 top = min(max(center - height / 2, rect.y0), rect.y1 - height)
-                collides = not source_crosses and any(
-                    hits(box, art) for box in ink_boxes(lines, rect, top, size, align, font))
+                drawn = ink_boxes(lines, rect, top, size, align, font)
+                collides = not source_crosses and any(hits(box, points) for box in drawn)
+                overlaps = any(box.intersects(other) for box in drawn for other in others)
                 shape = abs(len(lines) - len(group["lines"])) if group["box"] is None else len(lines)
-                score = (collides, -size, shape, index)
+                score = (collides or overlaps, -size, shape, index)
                 if best is None or score < best["score"]:
-                    best = {"score": score, "rect": rect, "top": top, "size": size, "lines": lines}
+                    best = {"score": score, "rect": rect, "top": top, "size": size, "lines": lines,
+                            "overlaps": overlaps}
         size = round(size - 0.2, 2)
     if best is None:
         return {"status": "does_not_fit", "size": floor}
-    best["status"] = "crosses_line_art" if best["score"][0] else "ok"
+    best["status"] = ("overlaps_label" if best["overlaps"] else "crosses_line_art") if best["score"][0] else "ok"
     return best
+
+
+def set_lines(page: Any, lines: list[str], boxes: list[Any], name: str, size: float,
+              color: tuple[float, float, float], fonts: Fonts) -> None:
+    """Set each line at its own baseline, exactly in the box placement checked (a text
+    box would space the lines by the font's own line height and drift down)."""
+    for text, box in zip(lines, boxes):
+        em_top = box.y0 + INK_MARGIN * size
+        page.insert_text((box.x0, em_top + fonts.baseline(name) * size), text, fontname=name, fontsize=size,
+                         color=color)
+
+
+def picture_area(crop: Any, caption: Any) -> Any:
+    """The rendered picture stops short of its own caption: the book sets the caption
+    as text, and the source caption would stay in English inside the picture."""
+    out = _fitz().Rect(crop)
+    if out.intersects(caption):
+        if caption.y0 - out.y0 < out.y1 - caption.y1:
+            out.y0 = caption.y1 + 1
+        else:
+            out.y1 = caption.y0 - 1
+    return out
 
 
 # --- render ----------------------------------------------------------------------------
@@ -328,37 +519,55 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
         if [g["text"] for g in groups] != [label["text"] for label in exhibit["labels"]]:
             raise BTPError(f"Exhibit {exhibit['key']}: labels on page {exhibit['page']} no longer match the inventory")
         targets = [t.strip() for t in translations]
-        changed = [(g, t) for g, t in zip(groups, targets) if t.replace("|", "") != g["text"]]
-        source_pieces, source_masks = line_art(page, crop)
-        patches = {id(g): knockouts_of(g, source_masks) for g, _t in changed}
+        changed = [(g, list_breaks([l["text"] for l in g["lines"]], t)) for g, t in zip(groups, targets)
+                   if t.replace("|", "") != g["text"]]
+        out = picture_area(crop, caption)
+        source_pieces, source_masks, source_cover = line_art(page, crop)
+        patches = {id(g): knockouts_of(g, source_masks, source_pieces) for g, _t in changed}
         for group, _t in changed:
             for line in group["lines"]:
                 inset = min(line["bbox"].height * 0.25, line["size"] * 0.3)
                 page.add_redact_annot(line["bbox"] + (0.3, inset, -0.3, -inset), fill=False)
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE)
         removed, kept_patches = remove_patches(page, [r for rects in patches.values() for r in rects])
+        # An underline goes with its words: painted out, unless another line crosses it.
+        underlines = [u for g, _t in changed for u in underlines_of(g, source_pieces)]
+        crossing = visible_points(([(a, b, o) for a, b, o in source_pieces
+                                    if not any(abs(a.y - u.y0) < 0.3 and abs(b.y - u.y0) < 0.3
+                                               and u.x0 - 0.5 <= min(a.x, b.x) and max(a.x, b.x) <= u.x1 + 0.5
+                                               for u in underlines)], source_masks, source_cover)) if underlines else PointGrid([])
+        kept_underlines = []
+        for underline in underlines:
+            strip = underline + (-0.4, -0.7, 0.4, 0.7)
+            if hits(strip, crossing):
+                kept_underlines.append(underline)
+                continue
+            page.draw_rect(strip, color=None, fill=(1, 1, 1), width=0, overlay=True)
         for name, path in fonts.files.items():
             page.insert_font(fontname=name, fontfile=path)
-        art = line_art(page, crop)
+        points = visible_points(line_art(page, crop))
+        footprints = {id(g): g["bbox"] + (0.5, 0.5, -0.5, -0.5) for g in groups}
         rows: list[dict[str, Any]] = []
+
+        def plan_for(group: dict[str, Any], target: str, max_size: float | None = None) -> dict[str, Any]:
+            name = "zhb" if "Bold" in group["font"] else "zh"
+            align = alignment(group, groups, boxes)
+            others = [rect for key, rect in footprints.items() if key != id(group)]
+            return choose(group, target, candidate_rects(group, groups, boxes, crop, align), align, points,
+                          fonts.objects[name], bool(patches[id(group)]), others, max_size=max_size)
+
         # Items of one list (a legend: same box, same left edge, same size) share the
         # smallest size any of them needs, so the list stays even.
-        plans: dict[int, dict[str, Any]] = {}
-        for group, target in changed:
-            name = "zhb" if "Bold" in group["font"] else "zh"
-            plans[id(group)] = choose(group, target, candidate_rects(group, groups, boxes, crop),
-                                      alignment(group, groups, boxes), art, fonts.objects[name], bool(patches[id(group)]))
+        plans: dict[int, dict[str, Any]] = {id(group): plan_for(group, target) for group, target in changed}
         for group, target in changed:
             column = [h for h, _t in changed if group["box"] is not None and h["box"] == group["box"]
                       and abs(h["bbox"].x0 - group["bbox"].x0) < 1.5 and h["size"] == group["size"]]
             if len(column) >= 3:
                 cap = min(plans[id(h)]["size"] for h in column)
                 if cap < plans[id(group)].get("size", cap):
-                    name = "zhb" if "Bold" in group["font"] else "zh"
-                    plans[id(group)] = choose(group, target, candidate_rects(group, groups, boxes, crop),
-                                              alignment(group, groups, boxes), art, fonts.objects[name],
-                                              bool(patches[id(group)]), max_size=cap)
+                    plans[id(group)] = plan_for(group, target, max_size=cap)
         ink: list[tuple[Any, float]] = []
+        drawn_by: list[tuple[int, Any]] = []
         new_patches: list[Any] = []
         for group, target in changed:
             name = "zhb" if "Bold" in group["font"] else "zh"
@@ -368,36 +577,41 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
                 rows.append({"source": group["text"], "target": target.replace("|", ""), "status": "does_not_fit"})
                 continue
             boxes_drawn = ink_boxes(plan["lines"], plan["rect"], plan["top"], plan["size"], align, fonts.objects[name])
+            drawn_by += [(id(group), box) for box in boxes_drawn]
             if patches[id(group)]:
                 for box in boxes_drawn:
-                    if hits(box, art):
+                    if hits(box, points):
                         patch = box + (-0.15 * plan["size"], -0.1 * plan["size"], 0.15 * plan["size"], 0.1 * plan["size"])
                         page.draw_rect(patch, color=None, fill=(1, 1, 1), width=0, overlay=True)
                         new_patches.append(patch)
-            box_top = plan["top"] - fonts.top_offset(name) * plan["size"]
-            rect = plan["rect"]
-            page.insert_textbox(fitz.Rect(rect.x0, box_top, rect.x1, box_top + ink_height(len(plan["lines"]), plan["size"]) + 2 * plan["size"]),
-                                "\n".join(plan["lines"]), fontname=name, fontsize=plan["size"], align=align,
-                                lineheight=LINE_HEIGHT, color=_rgb(group["color"]))
+            set_lines(page, plan["lines"], boxes_drawn, name, plan["size"], _rgb(group["color"]), fonts)
             ink += [(box, group["size"]) for box in boxes_drawn]
             rows.append({"source": group["text"], "target": target.replace("|", ""), "status": plan["status"],
                          "size_from": group["size"], "size_to": plan["size"], "lines": len(plan["lines"])})
         # Checks: no cut line without text over it; no source text left.
-        final_pieces, _masks = line_art(page, crop)
+        final_pieces, _masks, _cover = line_art(page, crop)
         cutters = [(rect, 10 ** 9) for rect in kept_patches + new_patches]
         gaps = [p for p in hidden_points(final_pieces, cutters)
                 if not any((box + (-0.3 * s, -0.3 * s, 0.3 * s, 0.3 * s)).contains(p) for box, s in ink)]
         left = page.get_text("text", clip=crop)
-        leftovers = [g["text"] for g, _t in changed if any(l["text"] in left for l in g["lines"] if len(l["text"]) > 3)]
+        # A number or code the translation keeps is not source text left behind.
+        leftovers = [g["text"] for g, t in changed
+                     if any(l["text"] in left and l["text"] not in t.replace("|", "") for l in g["lines"] if len(l["text"]) > 3)]
+        clashes = sorted({(a, b) for a, box in drawn_by for b, other in drawn_by
+                          if a < b and box.intersects(other + (0.2, 0.2, -0.2, -0.2))})
         destination.parent.mkdir(parents=True, exist_ok=True)
-        page.get_pixmap(dpi=RENDER_DPI, clip=crop, alpha=False).save(destination)
+        page.get_pixmap(dpi=RENDER_DPI, clip=out, alpha=False).save(destination)
+    names = {id(g): g["text"] for g in groups}
     problems = [f"{row['source']} ({row['status']})" for row in rows if row["status"] != "ok"]
     problems += [f"line cut without text near ({round(p.x)}, {round(p.y)})" for p in gaps[:5]]
     problems += [f"source text left: {text}" for text in leftovers]
+    problems += [f"labels overlap: {names[a]} / {names[b]}" for a, b in clashes]
+    problems += [f"underline kept (another line crosses it) near ({round(u.x0)}, {round(u.y0)})" for u in kept_underlines]
     return {
         "key": exhibit["key"], "page": exhibit["page"], "asset": str(destination), "labels": len(groups),
         "replaced": len(changed), "patches": {"source": sum(len(v) for v in patches.values()), "removed": len(removed),
-                                              "kept": len(kept_patches), "new": len(new_patches)},
+                                              "kept": len(kept_patches), "new": len(new_patches),
+                                              "underlines_removed": len(underlines) - len(kept_underlines)},
         "passed": not problems, "problems": problems, "rows": rows,
     }
 
@@ -413,7 +627,7 @@ def _rgb(color: int) -> tuple[float, float, float]:
 # --- rendering a project's translated diagrams --------------------------------------
 
 # Bump when placement or checks change, so cached renders are redone.
-RENDERER_VERSION = 2
+RENDERER_VERSION = 5
 RENDER_REPORT = "qa/figure-render.json"
 
 
