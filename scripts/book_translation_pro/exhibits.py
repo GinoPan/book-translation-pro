@@ -493,7 +493,9 @@ def _table_lines(page: Any, caption: dict[str, Any], body: tuple[str, float]) ->
 
     def stop(line: list[dict[str, Any]]) -> bool:
         is_body = all(s["font"] == body[0] and abs(s["size"] - body[1]) < 0.3 for s in line)
-        return is_body or bool(SOURCE_CAPTION_RE.match(_line_text(line)))
+        # Text larger than the body is a heading after the exhibit, never part of it.
+        is_heading = any(s["size"] > body[1] + 0.5 for s in line)
+        return is_body or is_heading or bool(SOURCE_CAPTION_RE.match(_line_text(line)))
 
     def caption_tail(line: list[dict[str, Any]]) -> bool:
         return bool(CONTINUATION_RE.match(_line_text(line)))

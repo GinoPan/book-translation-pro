@@ -44,7 +44,7 @@ def _diagram_pdf(path: Path) -> None:
     document.close()
 
 
-def _table_pdf(path: Path, total: str) -> None:
+def _table_pdf(path: Path, total: str, heading: str | None = None) -> None:
     document = fitz.open()
     page = document.new_page()
     _body(page, 60)
@@ -58,6 +58,9 @@ def _table_pdf(path: Path, total: str) -> None:
         page.insert_text((80, y), label, fontname="helv", fontsize=8)
         page.insert_text((300, y), amount, fontname="helv", fontsize=8)
         page.insert_text((380, y), share, fontname="helv", fontsize=8)
+    if heading:
+        # A section heading right under the table, set larger than the body.
+        page.insert_text((72, 252), heading, fontname="hebo", fontsize=12)
     _body(page, 270)
     document.save(path)
     document.close()
@@ -98,6 +101,17 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(exhibit["checks"]["characters_missing"], "")
             self.assertEqual({t["column"]: t["verdict"] for t in exhibit["checks"]["totals"]},
                              {"Amount": "exact", "Share": "exact"})
+
+    def test_section_heading_under_the_table_stays_out_of_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "book.pdf"
+            _table_pdf(pdf, "164,236", heading="2.2 EASY TO AGREE WITH")
+            (exhibit,) = build_inventory(pdf)["exhibits"]
+            self.assertEqual(exhibit["classification"], "table_grid")
+            cells = [cell for row in exhibit["table"]["rows"] for cell in row]
+            self.assertNotIn("EASY", " ".join(cells))
+            self.assertEqual(exhibit["table"]["rows"][-1], ["TOTAL COSTS", "164,236", "100.0%"])
+            self.assertLess(exhibit["region"][3], 252 - 12)
 
     def test_misprinted_total_is_reported_not_corrected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -308,6 +322,20 @@ class ExhibitQATests(unittest.TestCase):
     def test_changed_code_and_untranslated_label_fail(self) -> None:
         fails = self._fails(LABELS_SOURCE, _labels_target("Customer Needs", "FR一", "反馈"))
         self.assertEqual(len([f for f in fails if f.startswith("exhibit.labels")]), 2, fails)
+
+    def test_figure_audit_sees_the_image_across_a_long_label_block(self) -> None:
+        from book_translation_pro.figures import _caption_images
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            image = project / "assets/original/images/exhibit-1-1.png"
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b"png")
+            labels = "\n".join(f"{n}. 标签{n}" for n in range(1, 13))
+            target = ("![](assets/original/images/exhibit-1-1.png)\n\n<!-- btp:figure-labels exhibit=\"1.1\" -->\n"
+                      f"{labels}\n<!-- /btp:figure-labels -->\n\n**图表 1.1**\n")
+            present, missing = _caption_images(project, target, "**图表 1.1**")
+            self.assertEqual(list(present), ["assets/original/images/exhibit-1-1.png"])
+            self.assertEqual(missing, [])
 
     def test_missing_block_markers_fail(self) -> None:
         target = "![](assets/original/images/exhibit-1-1.png)\n\n1. 客户需求\n2. FR1\n3. 反馈\n\n**图表 1.1**\n"
