@@ -47,6 +47,15 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
    BTP prepare <project-dir>
    ```
 
+   For a PDF source, then build the exhibit inventory and replace exhibit fragments with figure-label blocks and rebuilt tables, before any translation. Run it first without `--apply`, read the report, then apply:
+
+   ```text
+   BTP retrofit-exhibits <project-dir>
+   BTP retrofit-exhibits <project-dir> --apply
+   ```
+
+   Every run, with or without `--apply`, rewrites `analysis/exhibit-inventory.json`; step 10 needs it. On a book whose exhibit review is already recorded, a new run can make that review stale.
+
 4. For PDF, inspect every page listed in `analysis/visual-summary.json.required_review_pages`:
 
    ```text
@@ -78,7 +87,7 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
 9. For each edit unit, inspect `show-unit --phase edit`, author a separate edited file, and record it with `record --kind edit`.
 
-10. For a PDF source with translated exhibits, run `BTP render-figures <project-dir>` to draw the translated diagrams, then `BTP exhibit-review <project-dir>`. Look at every comparison in `qa/exhibit-review/` and set each verdict in `qa/exhibit-review/review.json` to `ok` or `flagged` (a flagged exhibit needs a note; one with an automatic problem must be flagged). Record it, show the user `qa/exhibit-review/index.html` (flagged exhibits first), and after their approval:
+10. For a PDF source (the `exhibits` checkpoint waits for every PDF book, even one with no translated exhibits), run `BTP render-figures <project-dir>` to draw the translated diagrams, then `BTP exhibit-review <project-dir>`. Look at every comparison in `qa/exhibit-review/` and set each verdict in `qa/exhibit-review/review.json` to `ok` or `flagged` (a flagged exhibit needs a note; one with an automatic problem must be flagged). Record it, show the user `qa/exhibit-review/index.html` (flagged exhibits first), and after their approval:
 
    ```text
    BTP record <project-dir> --kind exhibit-review --input <judged-review.json>

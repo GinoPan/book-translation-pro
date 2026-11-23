@@ -18,7 +18,7 @@ from book_translation_pro.manifest import load_manifest
 from book_translation_pro.project import initialize_project, prepare_project
 from book_translation_pro.qa import run_qa
 from book_translation_pro.runtime import doctor_report, find_binary
-from book_translation_pro.state import dispatch_unit, plan_run, record_review, record_text_output
+from book_translation_pro.state import dispatch_unit, load_state, plan_run, record_review, record_text_output
 from book_translation_pro.visual import record_visual_review
 
 
@@ -151,6 +151,32 @@ def complete_fake_semantic_work(project: Path) -> None:
     assert not queue["blocked"], queue
     assert not queue["translation_unit_ids"], queue
     assert not queue["edit_unit_ids"], queue
+    complete_fake_exhibit_review(project, config)
+
+
+def complete_fake_exhibit_review(project: Path, config: dict) -> None:
+    """A PDF book waits for the exhibits checkpoint: review every exhibit, record it, approve.
+    The fixtures' exhibit fragments stay as extracted (retrofit runs without --apply)."""
+    if not any(item["checkpoint"] == "exhibits" and item["status"] == "pending"
+               for item in load_state(project).get("human_reviews", [])):
+        return
+    from book_translation_pro.exhibit_review import TEMPLATE, build_exhibit_review, record_exhibit_review
+    from book_translation_pro.figure_render import render_project_figures
+    from book_translation_pro.retrofit import retrofit_exhibits
+
+    retrofit_exhibits(project)
+    render_project_figures(project, config)
+    build_exhibit_review(project, config)
+    review = load_json(project / TEMPLATE)
+    review["reviewer"] = "integration-test"
+    for item in review["items"]:
+        item["verdict"] = "flagged" if item["auto_problems"] else "ok"
+        if item["auto_problems"]:
+            item["notes"] = "fixture exhibit left as extracted"
+    filled = project / "qa" / "exhibit-review-filled.json"
+    atomic_write_json(filled, review)
+    record_exhibit_review(project, config, filled)
+    record_review(project, "exhibits", True, "integration-test", "fixture exhibits accepted")
 
 
 @unittest.skipUnless(RUN_E2E, "set BTP_RUN_E2E=1 to run real Calibre/Pandoc integration")

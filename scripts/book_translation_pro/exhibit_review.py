@@ -32,7 +32,6 @@ RECORD = "qa/exhibit-review.json"
 CHECKPOINT = "exhibits"
 TREATED_TABLES = {"table_grid", "table_lists"}
 SIDE_HEIGHT = 900          # pixels; each side of a comparison is scaled to at most this
-_CORRECTION_RE = re.compile(r"^source_error_corrected:\s*(\S+)\s*->\s*(\S+)\s*\(exhibit\s+([^)\s]+)\)")
 
 
 # --- what there is to review -----------------------------------------------------------
@@ -63,12 +62,13 @@ def _table_blocks(project: Path, config: dict[str, Any]) -> list[dict[str, Any]]
 
 
 def _corrections(project: Path) -> dict[str, list[str]]:
+    """Declared misprint corrections by exhibit key, parsed exactly as QA parses them."""
+    from .qa import _declared_corrections
+
     found: dict[str, list[str]] = {}
     for path in sorted((project / "state" / "observations").glob("*.json")):
-        for issue in load_json(path).get("source_issues", []):
-            match = _CORRECTION_RE.match(str(issue).strip())
-            if match:
-                found.setdefault(match.group(3), []).append(f"{match.group(1)} -> {match.group(2)}")
+        for printed, corrected, key in _declared_corrections(load_json(path)):
+            found.setdefault(key, []).append(f"{printed} -> {corrected}")
     return found
 
 
@@ -77,7 +77,7 @@ def review_items(project: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
     say, and the evidence a recorded verdict is bound to."""
     inventory_path = project / "analysis" / "exhibit-inventory.json"
     if not inventory_path.is_file():
-        raise BTPError("No exhibit inventory: run retrofit-exhibits (or prepare) before exhibit-review")
+        raise BTPError("No exhibit inventory: run retrofit-exhibits (a run without --apply is enough) before exhibit-review")
     inventory = sorted(load_json(inventory_path)["exhibits"], key=lambda e: (e["page"], e["key"], e["part"]))
     report_path = project / RENDER_REPORT
     renders = load_json(report_path).get("renders", {}) if report_path.is_file() else {}
