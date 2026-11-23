@@ -107,6 +107,8 @@ def initialize_state(
             pending_pages = visual_summary.get("required_review_pages", [])
             status = "pending" if pending_pages else "not_required"
             notes = f"Pending required page reviews: {pending_pages}" if pending_pages else "No page meets the mode review threshold."
+        elif name == "exhibits":
+            status, notes = exhibits_review_default(bool(visual_summary.get("applicable")))
         else:
             status, notes = "pending", ""
         reviews.append({"checkpoint": name, "status": status, "recorded_at": now_utc(), "notes": notes})
@@ -131,6 +133,13 @@ def initialize_state(
         state["stages"]["visual"]["output_hashes"] = {"page_map": sha256_file(page_map_path)}
     save_state(project, state)
     return state
+
+
+def exhibits_review_default(pdf_source: bool) -> tuple[str, str]:
+    """Exhibits are inventoried from PDF pages only; other sources have nothing to review."""
+    if pdf_source:
+        return "pending", "Run exhibit-review, judge every exhibit, record it, then approve."
+    return "not_required", "Exhibits are inventoried from PDF sources only."
 
 
 def _review_pending(state: dict[str, Any], checkpoint: str) -> bool:
@@ -434,6 +443,10 @@ def record_review(project: Path, checkpoint: str, approved: bool, reviewer: str,
         from .publication_review import signoff_evidence
 
         evidence_hashes, exception_ids = signoff_evidence(project)
+    if checkpoint == "exhibits" and approved:
+        from .exhibit_review import review_evidence
+
+        evidence_hashes = review_evidence(project, load_resolved_project(project)[0])
     found = False
     for item in state.get("human_reviews", []):
         if item["checkpoint"] == checkpoint:

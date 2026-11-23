@@ -204,6 +204,13 @@ def underlines_of(group: dict[str, Any], pieces: list[tuple[Any, Any, int]]) -> 
     return found
 
 
+def ground_color(filled: list[tuple[Any, int, Any]], rect: Any) -> tuple[float, ...]:
+    """The colour under a rectangle: the fill of the topmost filled shape holding it,
+    white on the bare page (painting an underline out in white would streak a shaded box)."""
+    holding = [(seq, fill) for shape, seq, fill in filled if shape.contains(rect)]
+    return tuple(max(holding)[1]) if holding else (1, 1, 1)
+
+
 def hidden_points(pieces: list[Any], masks: list[tuple[Any, int]]) -> list[Any]:
     """Points of line art under a later white patch."""
     return [point for a, b, order in pieces for point in _samples(a, b, step=0.5)
@@ -532,6 +539,7 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
         removed, kept_patches = remove_patches(page, [r for rects in patches.values() for r in rects])
         # An underline goes with its words: painted out, unless another line crosses it.
         underlines = [u for g, _t in changed for u in underlines_of(g, source_pieces)]
+        ground = [(d["rect"], d["seqno"], d["fill"]) for d in page.get_drawings() if d.get("fill")] if underlines else []
         crossing = visible_points(([(a, b, o) for a, b, o in source_pieces
                                     if not any(abs(a.y - u.y0) < 0.3 and abs(b.y - u.y0) < 0.3
                                                and u.x0 - 0.5 <= min(a.x, b.x) and max(a.x, b.x) <= u.x1 + 0.5
@@ -542,7 +550,7 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
             if hits(strip, crossing):
                 kept_underlines.append(underline)
                 continue
-            page.draw_rect(strip, color=None, fill=(1, 1, 1), width=0, overlay=True)
+            page.draw_rect(strip, color=None, fill=ground_color(ground, strip), width=0, overlay=True)
         for name, path in fonts.files.items():
             page.insert_font(fontname=name, fontfile=path)
         points = visible_points(line_art(page, crop))
@@ -627,7 +635,7 @@ def _rgb(color: int) -> tuple[float, float, float]:
 # --- rendering a project's translated diagrams --------------------------------------
 
 # Bump when placement or checks change, so cached renders are redone.
-RENDERER_VERSION = 5
+RENDERER_VERSION = 6
 RENDER_REPORT = "qa/figure-render.json"
 
 
@@ -679,6 +687,21 @@ def diagram_blocks(project: Path, config: dict[str, Any]) -> list[dict[str, Any]
                         "exhibit": candidates[index] if index < len(candidates) else None,
                         "translations": block["labels"]})
     return out
+
+
+def diagram_render_problems(project: Path, item: dict[str, Any], renders: dict[str, Any]) -> list[str]:
+    """Why one label block's translated figure cannot be used ([] when it can): no
+    diagram to pair with, no render from its current labels, or a failed render."""
+    if item["exhibit"] is None:
+        return ["label block has no diagram in the exhibit inventory"]
+    asset = translated_asset(item["exhibit"])
+    render = renders.get(asset.rsplit("/", 1)[1].removesuffix(".png"))
+    if not render or render.get("input_hash") != render_input_hash(item["exhibit"], item["translations"]) \
+            or not (project / asset).is_file():
+        return ["not rendered from its current labels; run render-figures"]
+    if not render["passed"]:
+        return [f"render failed: {problem}" for problem in render["problems"][:3]]
+    return []
 
 
 def render_project_figures(project: Path, config: dict[str, Any], force: bool = False) -> dict[str, Any]:

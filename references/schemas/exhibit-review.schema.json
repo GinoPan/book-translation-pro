@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/exhibit-review.schema.json",
+  "title": "Exhibit review",
+  "description": "Every exhibit compared with its translation and judged ok or flagged; approval of the exhibits checkpoint binds to the recorded file.",
+  "type": "object",
+  "required": ["schema_version", "reviewer", "reviewed_at", "items"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "reviewer": {"type": "string"},
+    "reviewed_at": {"type": "string"},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "key", "part", "page", "classification", "treatment", "unit_id", "evidence", "image",
+                     "auto_problems", "corrections", "verdict", "notes"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "key": {"type": "string", "minLength": 1},
+          "part": {"type": "integer", "minimum": 1},
+          "page": {"type": "integer", "minimum": 1},
+          "classification": {"enum": ["diagram", "table_grid", "table_lists", "raster", "uncertain"]},
+          "treatment": {"enum": ["diagram", "table", "photo", "kept"]},
+          "unit_id": {"type": ["string", "null"]},
+          "evidence": {"type": "string", "minLength": 1},
+          "image": {"type": "string", "minLength": 1},
+          "auto_problems": {"type": "array", "items": {"type": "string"}},
+          "corrections": {"type": "array", "items": {"type": "string"}},
+          "verdict": {"enum": ["pending", "ok", "flagged"]},
+          "notes": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

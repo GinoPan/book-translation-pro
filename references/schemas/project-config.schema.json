@@ -81,7 +81,7 @@
         "checkpoints": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"enum": ["preflight", "terminology", "visual_exceptions", "publication_signoff"]}
+          "items": {"enum": ["preflight", "terminology", "visual_exceptions", "exhibits", "publication_signoff"]}
         }
       },
       "additionalProperties": false

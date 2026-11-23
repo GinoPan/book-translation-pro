@@ -27,6 +27,7 @@ REQUIRED_SCHEMAS = (
     "qa-exceptions.schema.json",
     "publication-review.schema.json",
     "exhibit-inventory.schema.json",
+    "exhibit-review.schema.json",
 )
 
 

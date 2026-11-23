@@ -26,7 +26,7 @@ from .publication import (
 from .rights import publication_rights_issues, rights_warning
 from .structure import IMAGE_RE, parse_blocks
 from .exhibits import keeps_source_form
-from .figure_render import RENDER_REPORT, diagram_blocks, render_input_hash, translated_asset
+from .figure_render import RENDER_REPORT, diagram_blocks, diagram_render_problems
 from .figures import STRUCTURED_RECONSTRUCTION_PREFIXES, run_figure_audit
 from .retrofit import exhibit_blocks
 from .visual import run_visual_qa
@@ -702,6 +702,36 @@ def _exhibit_unit_checks(
     return stripped
 
 
+def _exhibit_review_checks(project: Path, config: dict[str, Any], checks: list[dict[str, Any]]) -> None:
+    """The recorded exhibit review covers what is there now; its flags reach the user;
+    an approval of the exhibits checkpoint is for that same review."""
+    from .exhibit_review import RECORD, stale_items
+
+    path = project / RECORD
+    if not path.is_file():
+        _check(checks, "exhibit.review_record", "fail",
+               "No recorded exhibit review: run exhibit-review, judge every exhibit, and record it "
+               "(record --kind exhibit-review)")
+        return
+    review = load_json(path)
+    stale = stale_items(project, config, review)
+    if stale:
+        _check(checks, "exhibit.review_record", "fail",
+               f"The recorded exhibit review is stale for {len(stale)} exhibit(s): {', '.join(stale[:10])}; "
+               "run exhibit-review again and record it")
+    else:
+        _check(checks, "exhibit.review_record", "pass", f"All {len(review['items'])} exhibits reviewed")
+    flagged = [item["id"] for item in review["items"] if item["verdict"] == "flagged"]
+    if flagged:
+        _check(checks, "exhibit.review_flagged", "warn",
+               f"{len(flagged)} exhibit(s) flagged for the user (qa/exhibit-review/index.html): {', '.join(flagged)}")
+    approval = next((item for item in load_state(project).get("human_reviews", [])
+                     if item["checkpoint"] == "exhibits" and item["status"] == "approved"), None)
+    if approval and approval.get("evidence_hashes", {}).get("exhibit_review") != sha256_file(path):
+        _check(checks, "exhibit.review_approval", "fail",
+               "The exhibits checkpoint was approved for a different exhibit review; approve the current one")
+
+
 def _exhibit_book_checks(project: Path, config: dict[str, Any], checks: list[dict[str, Any]],
                          corrected_keys: set[str]) -> None:
     """Every translated diagram is rendered from its current labels and passed its
@@ -714,21 +744,10 @@ def _exhibit_book_checks(project: Path, config: dict[str, Any], checks: list[dic
     renders = load_json(report_path).get("renders", {}) if report_path.is_file() else {}
     rendered = 0
     for item in diagram_blocks(project, config):
-        if item["exhibit"] is None:
-            _check(checks, "exhibit.render", "fail",
-                   f"Exhibit {item['key']}: label block has no diagram in the exhibit inventory", item["unit_id"])
-            continue
-        asset = translated_asset(item["exhibit"])
-        render = renders.get(asset.rsplit("/", 1)[1].removesuffix(".png"))
-        if not render or render.get("input_hash") != render_input_hash(item["exhibit"], item["translations"]) \
-                or not (project / asset).is_file():
-            _check(checks, "exhibit.render", "fail",
-                   f"Exhibit {item['key']} (page {item['exhibit']['page']}) is not rendered from its current labels; "
-                   "run render-figures", item["unit_id"])
-        elif not render["passed"]:
-            _check(checks, "exhibit.render", "fail",
-                   f"Exhibit {item['key']} (page {item['exhibit']['page']}) render failed: {'; '.join(render['problems'][:3])}",
-                   item["unit_id"])
+        problems = diagram_render_problems(project, item, renders)
+        if problems:
+            where = f" (page {item['exhibit']['page']})" if item["exhibit"] else ""
+            _check(checks, "exhibit.render", "fail", f"Exhibit {item['key']}{where}: {'; '.join(problems)}", item["unit_id"])
         else:
             rendered += 1
     if rendered:
@@ -740,6 +759,10 @@ def _exhibit_book_checks(project: Path, config: dict[str, Any], checks: list[dic
                        f"Exhibit {exhibit['key']} (page {exhibit['page']}): {total['column']} total {total['stated']} "
                        f"but its rows sum to {total['sum_of_rows']}; correct it with a translator's note "
                        "(source_error_corrected) or confirm the printed value")
+    if "exhibits" in config.get("execution", {}).get("checkpoints", []):
+        # The exhibit review lists every exhibit left as it was among its flags.
+        _exhibit_review_checks(project, config, checks)
+        return
     log_path = project / "analysis" / "exhibit-retrofit-log.json"
     if log_path.is_file():
         left = [f"{d['key']}" + (f"/{d['part']}" if d["part"] > 1 else "")

@@ -86,6 +86,13 @@ def samples() -> dict[str, dict]:
                             "totals": [{"column": "column 2", "stated": 10, "sum_of_rows": 10, "verdict": "exact"}]}},
             ],
         },
+        "exhibit-review.schema.json": {
+            "schema_version": 1, "reviewer": "model", "reviewed_at": "2026-11-23T00:00:00Z",
+            "items": [{"id": "1.1", "key": "1.1", "part": 1, "page": 3, "classification": "diagram",
+                       "treatment": "diagram", "unit_id": "unit-0001", "evidence": digest,
+                       "image": "exhibit-1-1.png", "auto_problems": [], "corrections": [],
+                       "verdict": "ok", "notes": ""}],
+        },
         "publication-review.schema.json": {
             "schema_version": 1, "candidate_sha256": digest, "clean_master_sha256": digest,
             "reviewer": "tester", "reviewed_at": "2026-09-08T00:00:00Z",

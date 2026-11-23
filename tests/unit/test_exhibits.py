@@ -257,6 +257,14 @@ class RendererRuleTests(unittest.TestCase):
         found = figure_render.underlines_of(group, [underline, box_edge, stem, shaft_end])
         self.assertEqual([(round(r.x0), round(r.x1)) for r in found], [(70, 119)])
 
+    def test_an_underline_is_painted_out_in_the_colour_under_it(self) -> None:
+        strip = fitz.Rect(100, 120, 140, 121)
+        page_panel = (fitz.Rect(0, 0, 400, 400), 1, (1.0, 1.0, 1.0))
+        grey_box = (fitz.Rect(90, 100, 200, 140), 5, (0.8, 0.8, 0.8))
+        elsewhere = (fitz.Rect(300, 300, 350, 350), 9, (0.2, 0.2, 0.2))
+        self.assertEqual(figure_render.ground_color([page_panel, grey_box, elsewhere], strip), (0.8, 0.8, 0.8))
+        self.assertEqual(figure_render.ground_color([elsewhere], strip), (1, 1, 1))
+
     def test_a_knockout_hides_an_earlier_line_but_a_box_background_does_not(self) -> None:
         P = fitz.Point
         group = {"bbox": fitz.Rect(100, 100, 140, 108), "size": 8}
@@ -314,6 +322,138 @@ class RendererRuleTests(unittest.TestCase):
             self.assertEqual(rows["成本吞吐时间"]["lines"], 2)
             self.assertEqual(report["patches"]["underlines_removed"], 1)
 
+
+def _diagram_project(root: Path) -> tuple[dict, list[str], Path]:
+    """A one-unit project whose target translates the diagram of ``_diagram_pdf``."""
+    import json
+
+    for folder in ("source", "analysis", "target/edited", "qa", "source-work/work-units", "state"):
+        (root / folder).mkdir(parents=True)
+    _diagram_pdf(root / "source" / "original.pdf")
+    inventory = build_inventory(root / "source" / "original.pdf")
+    (root / "analysis" / "exhibit-inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+    digest = "a" * 64
+    manifest = {"schema_version": 1, "source_fingerprint": digest, "resolved_config_hash": digest,
+                "book_map_hash": digest, "style_guide_hash": digest, "units": [{
+                    "unit_id": "unit-0001", "order": 0, "book_node_id": None, "segment_ids": ["seg-1"],
+                    "source_file": "source-work/work-units/unit-0001.md", "source_hash": digest,
+                    "draft_file": "target/draft/unit-0001.md", "edit_file": "target/edited/unit-0001.md",
+                    "capsule_file": "context/capsules/unit-0001.json",
+                    "observation_file": "state/observations/unit-0001.json"}]}
+    (root / "state" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    from book_translation_pro.state import initialize_state
+    state = initialize_state(root, "demo", digest, digest, manifest, ["exhibits"], {"applicable": True})
+    assert [r["status"] for r in state["human_reviews"]] == ["pending"]  # a PDF book has exhibits to review
+    (root / "source-work" / "work-units" / "unit-0001.md").write_text(LABELS_SOURCE, encoding="utf-8")
+    config = {"source": {"path": "source/original.pdf", "format": "pdf"}, "passes": {"edit": True},
+              "execution": {"checkpoints": ["exhibits"]}}
+    names = {"Customer Needs": "客户需求", "Strategy Changes": "战略变化", "Feedback": "反馈"}
+    labels = [names[label["text"]] for label in inventory["exhibits"][0]["labels"]]
+    unit = root / "target" / "edited" / "unit-0001.md"
+    unit.write_text(_labels_target(*labels), encoding="utf-8")
+    return config, labels, unit
+
+
+class ExhibitReviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        try:
+            figure_render.font_files()
+        except BTPError:
+            self.skipTest("no CJK font installed")
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.config, self.labels, self.unit = _diagram_project(self.root)
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def _template(self) -> dict:
+        import json
+
+        from book_translation_pro.exhibit_review import TEMPLATE, build_exhibit_review
+        summary = build_exhibit_review(self.root, self.config)
+        self.assertEqual(summary["exhibits"], 1)
+        return json.loads((self.root / TEMPLATE).read_text(encoding="utf-8"))
+
+    def _record(self, review: dict) -> dict:
+        import json
+
+        from book_translation_pro.exhibit_review import record_exhibit_review
+        path = self.root / "review-filled.json"
+        path.write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
+        return record_exhibit_review(self.root, self.config, path)
+
+    def test_every_exhibit_is_judged_and_the_record_is_bound_to_what_is_there(self) -> None:
+        from book_translation_pro.exhibit_review import OVERVIEW, review_evidence
+        from book_translation_pro.figure_render import render_project_figures
+        from book_translation_pro.qa import _exhibit_review_checks
+
+        render_project_figures(self.root, self.config)
+        review = self._template()
+        (item,) = review["items"]
+        self.assertEqual((item["id"], item["treatment"], item["auto_problems"]), ("1.1", "diagram", []))
+        self.assertTrue((self.root / "qa" / "exhibit-review" / item["image"]).is_file())
+        self.assertTrue((self.root / OVERVIEW).is_file())
+        with self.assertRaisesRegex(BTPError, "pending"):
+            self._record(review)                                   # nothing judged yet
+        item["verdict"] = "ok"
+        with self.assertRaisesRegex(BTPError, "reviewer"):
+            self._record(review)
+        review["reviewer"] = "model"
+        self.assertEqual(self._record(review)["flagged"], [])
+        self.assertTrue(review_evidence(self.root, self.config)["exhibit_review"])
+        checks: list[dict] = []
+        _exhibit_review_checks(self.root, self.config, checks)
+        self.assertEqual([c["status"] for c in checks], ["pass"])
+
+        # A changed label makes the recorded review stale: it cannot be recorded or approved.
+        self.unit.write_text(_labels_target(*self.labels[:-1], "回馈"), encoding="utf-8")
+        render_project_figures(self.root, self.config)
+        with self.assertRaisesRegex(BTPError, "does not match"):
+            self._record(review)
+        with self.assertRaisesRegex(BTPError, "stale"):
+            review_evidence(self.root, self.config)
+        checks = []
+        _exhibit_review_checks(self.root, self.config, checks)
+        self.assertEqual([(c["id"], c["status"]) for c in checks], [("exhibit.review_record", "fail")])
+
+    def test_an_exhibit_with_an_automatic_problem_must_be_flagged_with_a_note(self) -> None:
+        from book_translation_pro.qa import _exhibit_review_checks
+
+        # Not rendered: the review says so, and only a flagged verdict with a note is accepted.
+        review = self._template()
+        (item,) = review["items"]
+        self.assertTrue(item["auto_problems"])
+        review["reviewer"] = "model"
+        item["verdict"] = "ok"
+        with self.assertRaisesRegex(BTPError, "must be flagged"):
+            self._record(review)
+        item["verdict"] = "flagged"
+        with self.assertRaisesRegex(BTPError, "need a note"):
+            self._record(review)
+        item["notes"] = "not rendered yet"
+        self.assertEqual(self._record(review)["flagged"], ["1.1"])
+        checks: list[dict] = []
+        _exhibit_review_checks(self.root, self.config, checks)
+        self.assertIn(("exhibit.review_flagged", "warn"), [(c["id"], c["status"]) for c in checks])
+
+    def test_only_a_pdf_book_waits_for_an_exhibit_review(self) -> None:
+        from book_translation_pro.state import exhibits_review_default
+        self.assertEqual(exhibits_review_default(True)[0], "pending")
+        self.assertEqual(exhibits_review_default(False)[0], "not_required")
+
+    def test_prepare_adopts_a_review_policy_change_for_a_manifest_without_an_extraction_hash(self) -> None:
+        from book_translation_pro.artifacts import hash_data
+        from book_translation_pro.config import extraction_config_hash
+        from book_translation_pro.project import _prepared_extraction_hash
+
+        previous = {"source": {"path": "a.pdf"}, "chunking": {}, "visual": {}, "execution": {"checkpoints": []}}
+        manifest = {"resolved_config_hash": hash_data(previous)}
+        self.assertEqual(_prepared_extraction_hash(manifest, previous), extraction_config_hash(previous))
+        # A previous configuration that is not the one the manifest was prepared with proves nothing.
+        other = dict(previous, chunking={"target_characters": 4000})
+        self.assertIsNone(_prepared_extraction_hash(manifest, other))
+        self.assertIsNone(_prepared_extraction_hash(manifest, None))
 
 def _units(*texts: str) -> list[dict]:
     return [{"id": f"unit-{n:04d}", "text": text, "lines": text.split("\n")} for n, text in enumerate(texts, 1)]
@@ -525,26 +665,7 @@ class ExhibitQATests(unittest.TestCase):
             self.skipTest("no CJK font installed")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for folder in ("source", "analysis", "target/edited", "qa"):
-                (root / folder).mkdir(parents=True)
-            _diagram_pdf(root / "source" / "original.pdf")
-            inventory = build_inventory(root / "source" / "original.pdf")
-            (root / "analysis" / "exhibit-inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
-            digest = "a" * 64
-            manifest = {"schema_version": 1, "source_fingerprint": digest, "resolved_config_hash": digest,
-                        "book_map_hash": digest, "style_guide_hash": digest, "units": [{
-                            "unit_id": "unit-0001", "order": 0, "book_node_id": None, "segment_ids": ["seg-1"],
-                            "source_file": "source-work/work-units/unit-0001.md", "source_hash": digest,
-                            "draft_file": "target/draft/unit-0001.md", "edit_file": "target/edited/unit-0001.md",
-                            "capsule_file": "context/capsules/unit-0001.json",
-                            "observation_file": "state/observations/unit-0001.json"}]}
-            (root / "state").mkdir()
-            (root / "state" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-            config = {"source": {"path": "source/original.pdf", "format": "pdf"}, "passes": {"edit": True}}
-            names = {"Customer Needs": "客户需求", "Strategy Changes": "战略变化", "Feedback": "反馈"}
-            labels = [names[label["text"]] for label in inventory["exhibits"][0]["labels"]]
-            unit = root / "target" / "edited" / "unit-0001.md"
-            unit.write_text(_labels_target(*labels), encoding="utf-8")
+            config, labels, unit = _diagram_project(root)
 
             first = render_project_figures(root, config)
             self.assertEqual((first["rendered"], first["failed"]), (1, 0), first)
