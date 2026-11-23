@@ -553,6 +553,68 @@ class RetrofitTests(unittest.TestCase):
         (decision,) = self._plan(units)
         self.assertEqual(decision["status"], "unmatched")
 
+    def test_an_extracted_image_beside_its_caption_becomes_the_label_block(self) -> None:
+        # A newly prepared book: extraction cropped the figure and dropped its labels.
+        image = '<img src="assets\\original/images/000000.png" class="calibre2" />'
+        units = _units("\n\n".join([PROSE_BEFORE, image, "**EXHIBIT 1.1** **Planning Loop**", PROSE_AFTER]) + "\n")
+        (decision,) = self._plan(units)
+        self.assertEqual((decision["status"], decision["extraction_image"]), ("replace", image))
+        text = rewrite_units(units, [decision])[0]
+        self.assertNotIn("000000.png", text)
+        self.assertIn(PROSE_BEFORE + "\n\n![](assets/original/images/exhibit-1-1.png)\n\n"
+                      '<!-- btp:figure-labels exhibit="1.1" -->\n', text)
+        self.assertIn("<!-- /btp:figure-labels -->\n\n**EXHIBIT 1.1** **Planning Loop**\n\n" + PROSE_AFTER, text)
+
+    def test_the_extracted_image_is_replaced_where_extraction_put_it(self) -> None:
+        caption = "**EXHIBIT 1.1** **Planning Loop**"
+        # Printed above its caption, extracted below it: the block takes the image's place.
+        units = _units("\n\n".join([PROSE_BEFORE, caption, "![](assets/original/images/below.png)", PROSE_AFTER]) + "\n")
+        (decision,) = self._plan(units)
+        self.assertEqual(decision["status"], "replace")
+        text = rewrite_units(units, [decision])[0]
+        self.assertIn(caption + "\n\n![](assets/original/images/exhibit-1-1.png)", text)
+        self.assertNotIn("below.png", text)
+        # An image on each side: the printed side's is the exhibit, the other stays.
+        units = _units("\n\n".join(["![](assets/original/images/above.png)", caption,
+                                    "![](assets/original/images/below.png)"]) + "\n")
+        (decision,) = self._plan(units)
+        text = rewrite_units(units, [decision])[0]
+        self.assertNotIn("above.png", text)
+        self.assertIn(caption + "\n\n![](assets/original/images/below.png)", text)
+
+    def test_an_extracted_table_image_becomes_the_rebuilt_table(self) -> None:
+        table = dict(DIAGRAM, key="2.1", classification="table_grid", orientation="below_caption",
+                     caption="EXHIBIT 2.1 Costs", labels=[],
+                     table={"mode": "grid", "header": ["", "Amount"], "meta": [], "continues": False,
+                            "rows": [["Material", "$111,431"], ["Total", "$111,431"]]})
+        units = _units("\n\n".join([PROSE_BEFORE, '<img src="assets\\original/images/000027.png" />',
+                                    "**EXHIBIT 2.1** **Costs**", PROSE_AFTER]) + "\n")
+        (decision,) = self._plan(units, table)
+        self.assertEqual(decision["status"], "replace")
+        text = rewrite_units(units, [decision])[0]
+        self.assertNotIn("000027.png", text)
+        self.assertIn(PROSE_BEFORE + '\n\n<!-- btp:exhibit-table exhibit="2.1" -->', text)
+        self.assertIn("| Material | \\$111,431 |", text)
+        self.assertIn("<!-- /btp:exhibit-table -->\n\n**EXHIBIT 2.1** **Costs**\n\n" + PROSE_AFTER, text)
+
+    def test_an_image_is_taken_only_when_nothing_else_is_there(self) -> None:
+        image = "![](assets/original/images/000000.png)"
+        caption = "**EXHIBIT 1.1** **Planning Loop**"
+        cases = {
+            # Some label text survived: the extraction is not understood well enough.
+            "labels left": [image, "**Customer**", caption],
+            # Prose between the image and the caption: the image may be another figure's.
+            "prose between": [image, PROSE_BEFORE, caption],
+            "prose on both sides": [image, PROSE_BEFORE, caption, PROSE_AFTER, image],
+        }
+        for name, lines in cases.items():
+            with self.subTest(name):
+                units = _units("\n\n".join(lines) + "\n")
+                (decision,) = self._plan(units)
+                self.assertEqual(decision["status"], "unmatched")
+                self.assertNotIn("extraction_image", decision)
+                self.assertEqual(rewrite_units(units, [decision]), {})
+
     def test_second_run_finds_the_exhibit_already_retrofitted(self) -> None:
         units = _units("\n\n".join(["**EXHIBIT 1.1** **Planning Loop**", FRAGMENTS,
                                     "**Needs** **Changes** **Feedback**"]) + "\n")
@@ -604,6 +666,56 @@ class RetrofitTests(unittest.TestCase):
         units = _units("**EXHIBIT 1.1** **Planning Loop**\n\n" + FRAGMENTS + "\n")
         (decision,) = self._plan(units, raster)
         self.assertEqual(decision["status"], "untouched")
+
+
+class PrepareHookTests(unittest.TestCase):
+    """prepare treats exhibits itself, before capsules, the Page Map and the manifest."""
+
+    def _prepare(self, root: Path, make_pdf, mode: str = "study") -> Path:
+        from book_translation_pro.project import initialize_project, prepare_project
+
+        make_pdf(root / "book.pdf")
+        project = Path(initialize_project(root / "book.pdf", root / "project", "zh-Hans", "en", mode, ["markdown"])["project"])
+        with mock.patch("book_translation_pro.ingest._convert_with_tools", side_effect=BTPError("no calibre in unit tests")):
+            self.result = prepare_project(project)
+        return project
+
+    def test_a_new_book_gets_label_blocks_and_crops_and_the_manifest_sees_them(self) -> None:
+        import json
+
+        from book_translation_pro.artifacts import sha256_file
+        from book_translation_pro.retrofit import exhibit_blocks
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = self._prepare(Path(directory), _diagram_pdf)
+            self.assertEqual(self.result["exhibits"]["replace"], 1)
+            unit = project / "source-work" / "work-units" / "unit-0001.md"
+            text = unit.read_text(encoding="utf-8")
+            (block,) = exhibit_blocks(text)
+            self.assertEqual(sorted(block["labels"]), ["Customer Needs", "Feedback", "Strategy Changes"])
+            self.assertIn("![](assets/original/images/exhibit-1-1.png)", text)
+            self.assertTrue((project / "assets" / "original" / "images" / "exhibit-1-1.png").stat().st_size > 0)
+            manifest = json.loads((project / "state" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["units"][0]["source_hash"], sha256_file(unit))
+            log = json.loads((project / "analysis" / "exhibit-retrofit-log.json").read_text(encoding="utf-8"))
+            self.assertEqual((log["applied_by"], log["decisions"][0]["status"]), ("prepare", "replace"))
+            self.assertTrue((project / "analysis" / "exhibit-inventory.json").is_file())
+
+    def test_a_new_book_gets_its_tables_rebuilt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = self._prepare(Path(directory), lambda path: _table_pdf(path, "164,236"))
+            text = (project / "source-work" / "work-units" / "unit-0001.md").read_text(encoding="utf-8")
+            self.assertIn('<!-- btp:exhibit-table exhibit="2.1" -->', text)
+            self.assertIn("| Material costs | 111,431 | 50.0% |", text)
+            self.assertIn("| TOTAL COSTS | 164,236 | 100.0% |", text)
+
+    def test_fast_mode_has_no_exhibit_checkpoint_and_leaves_exhibits_as_extracted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = self._prepare(Path(directory), _diagram_pdf, mode="fast")
+            self.assertNotIn("exhibits", self.result)
+            self.assertFalse((project / "analysis" / "exhibit-inventory.json").exists())
+            text = (project / "source-work" / "work-units" / "unit-0001.md").read_text(encoding="utf-8")
+            self.assertNotIn("btp:figure-labels", text)
 
 
 if __name__ == "__main__":

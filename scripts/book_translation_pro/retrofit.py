@@ -230,6 +230,26 @@ def _walk(units: list[dict[str, Any]], start: tuple[int, int], step: int, pool: 
         found.append(_fragment(line, plain, u, i, sum(letters.values())))
 
 
+IMAGE_LINE_RE = re.compile(r"^\s*(?:!\[[^\]]*\]\([^)]*\)|<img\b[^>]*>)\s*$", re.IGNORECASE)
+
+
+def _image_beside(units: list[dict[str, Any]], caption: tuple[int, int], before: bool) -> tuple[int, int] | None:
+    """The image line next to a caption on the figure's side, with only blank lines
+    between (across a unit boundary too), or None."""
+    u, i = caption
+    step = -1 if before else 1
+    while True:
+        i += step
+        while not 0 <= i < len(units[u]["lines"]):
+            u += step
+            if not 0 <= u < len(units):
+                return None
+            i = len(units[u]["lines"]) - 1 if before else 0
+        line = units[u]["lines"][i]
+        if line.strip():
+            return (u, i) if IMAGE_LINE_RE.match(line) else None
+
+
 def _load_units(project: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
     units = []
     for entry in sorted(manifest["units"], key=lambda item: item["order"]):
@@ -297,12 +317,25 @@ def plan_retrofit(project: Path, units: list[dict[str, Any]], inventory: dict[st
         decision.update(caption_unit=units[caption[0]]["id"], coverage=round(coverage, 3), scrambled=scrambled,
                         size=sum(total.values()), left=" ".join(sorted((+pool).elements()))[:200],
                         stopped_before=stop_before, stopped_after=stop_after)
-        if coverage < MIN_COVERAGE:
+        image = None
+        if coverage < MIN_COVERAGE and not fragments and not scrambled:
+            # Extraction already cropped the exhibit into an image and dropped its text
+            # (a newly prepared book): that image becomes the label block or the table.
+            # Extraction may set the image on either side of the caption, whatever the
+            # page does; the printed side is tried first.
+            printed_above = exhibit.get("orientation") == "above_caption"
+            image = _image_beside(units, caption, printed_above) or _image_beside(units, caption, not printed_above)
+            if image is not None and image not in claimed:
+                fragments = [{"unit": image[0], "line": image[1], "text": units[image[0]]["lines"][image[1]],
+                              "keep": [], "size": 0}]
+                decision["extraction_image"] = fragments[0]["text"]
+        if coverage < MIN_COVERAGE and "extraction_image" not in decision:
             decision.update(status="unmatched",
                             reason=f"only {found} of {sum(total.values())} exhibit letters found as fragments")
             continue
         claimed.update((item["unit"], item["line"]) for item in fragments)
-        before = exhibit["orientation"] == "above_caption"
+        # The exhibit goes where it is printed, or where extraction put its image.
+        before = image < caption if "extraction_image" in decision else exhibit["orientation"] == "above_caption"
         decision.update(
             status="replace", insert_before_caption=before, caption_line=caption[1],
             insert=_block(exhibit),
@@ -351,15 +384,15 @@ def rewrite_units(units: list[dict[str, Any]], decisions: list[dict[str, Any]]) 
     return out
 
 
-def retrofit_exhibits(project: Path, apply: bool = False) -> dict[str, Any]:
-    config, _ = load_resolved_project(project)
+def _inventory_and_plan(project: Path, config: dict[str, Any], units: list[dict[str, Any]], apply: bool
+                        ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, str], dict[str, Any]]:
+    """Inventory the source PDF (written to analysis/), decide every exhibit, and
+    return (inventory, decisions, new unit texts, report)."""
     if config.get("source", {}).get("format") != "pdf":
         raise BTPError("retrofit-exhibits needs a PDF source (exhibits are read from the page geometry)")
     inventory = build_inventory(safe_project_path(project, config["source"]["path"]))
     validate_schema(inventory, "exhibit-inventory.schema.json")
     atomic_write_json(project / "analysis" / "exhibit-inventory.json", inventory)
-    manifest = load_manifest(project)
-    units = _load_units(project, manifest)
     decisions = plan_retrofit(project, units, inventory)
     rewritten = rewrite_units(units, decisions)
     public = [{k: v for k, v in d.items() if not k.startswith("_")} for d in decisions]
@@ -373,8 +406,67 @@ def retrofit_exhibits(project: Path, apply: bool = False) -> dict[str, Any]:
         },
         "decisions": public,
     }
+    return inventory, decisions, rewritten, report
+
+
+def _write_diagram_crops(project: Path, config: dict[str, Any], inventory: dict[str, Any],
+                         decisions: list[dict[str, Any]]) -> list[str]:
+    """The original image each inserted diagram block points at, cropped from the
+    page by the inventory's crop box when it does not exist yet."""
+    import fitz
+
+    from .exhibits import upright_page
+
+    exhibits = {(e["key"], e["part"], e["page"]): e for e in inventory["exhibits"]}
+    written: list[str] = []
+    with fitz.open(safe_project_path(project, config["source"]["path"])) as document:
+        for decision in decisions:
+            if decision["status"] != "replace" or decision["classification"] != "diagram":
+                continue
+            exhibit = exhibits[(decision["key"], decision["part"], decision["page"])]
+            asset = project / "assets" / "original" / "images" / _figure_asset_name(exhibit["key"])
+            if asset.is_file():
+                continue
+            page, _rotation, _holder = upright_page(document, exhibit["page"])
+            asset.parent.mkdir(parents=True, exist_ok=True)
+            page.get_pixmap(dpi=180, clip=fitz.Rect(exhibit["crop"]), alpha=False).save(asset)
+            decision["asset_exists"] = True
+            written.append(f"assets/original/images/{asset.name}")
+    return written
+
+
+def retrofit_prepared_units(project: Path, config: dict[str, Any], unit_ids: list[str]) -> dict[str, Any]:
+    """prepare's exhibit step: treat every exhibit in freshly written source units.
+
+    Runs before capsules, the Page Map and the manifest exist, so it rewrites the
+    unit files only; the manifest is then built from the treated text.  Writes the
+    original crop of each inserted diagram and the decision log
+    (analysis/exhibit-retrofit-log.json).
+    """
+    units = []
+    for unit_id in unit_ids:
+        path = project / "source-work" / "work-units" / f"{unit_id}.md"
+        text = path.read_text(encoding="utf-8")
+        units.append({"id": unit_id, "path": path, "text": text, "lines": text.split("\n")})
+    inventory, decisions, rewritten, report = _inventory_and_plan(project, config, units, apply=True)
+    for u, text in rewritten.items():
+        atomic_write_text(units[u]["path"], text)
+    report["summary"]["crops_written"] = _write_diagram_crops(project, config, inventory, decisions)
+    report["decisions"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in decisions]
+    report["applied_by"] = "prepare"
+    atomic_write_json(project / "analysis" / "exhibit-retrofit-log.json", report)
+    return report["summary"]
+
+
+def retrofit_exhibits(project: Path, apply: bool = False) -> dict[str, Any]:
+    config, _ = load_resolved_project(project)
+    manifest = load_manifest(project)
+    units = _load_units(project, manifest)
+    inventory, decisions, rewritten, report = _inventory_and_plan(project, config, units, apply)
     name = "exhibit-retrofit-log.json" if apply else "exhibit-retrofit-plan.json"
     if apply:
+        report["summary"]["crops_written"] = _write_diagram_crops(project, config, inventory, decisions)
+        report["decisions"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in decisions]
         hashes = {}
         for u, text in rewritten.items():
             atomic_write_text(units[u]["path"], text)

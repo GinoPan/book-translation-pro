@@ -416,6 +416,13 @@ def prepare_project(
     units = make_work_units(assigned, chunking["target_characters"], chunking["hard_max_characters"])
     for unit in units:
         atomic_write_text(project / "source-work" / "work-units" / f"{unit['id']}.md", unit.pop("text"))
+    exhibits = None
+    if fmt == "pdf" and "exhibits" in resolved["execution"].get("checkpoints", []):
+        # Exhibits are treated before anything reads the unit text: capsules, the
+        # Page Map, and the manifest hashes all see the rebuilt tables and label blocks.
+        from .retrofit import retrofit_prepared_units
+
+        exhibits = retrofit_prepared_units(project, resolved, [unit["id"] for unit in units])
 
     glossary_path = project / "terminology" / "glossary.json"
     if glossary_path.is_file():
@@ -497,6 +504,8 @@ def prepare_project(
         "visual": visual_summary,
         "markup_only_unit_ids": markup_only,
     }
+    if exhibits is not None:
+        result["exhibits"] = exhibits
     if rebuild:
         result["preserved"] = {
             "unit_records": carried_records,

@@ -47,14 +47,16 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
    BTP prepare <project-dir>
    ```
 
-   For a PDF source, then build the exhibit inventory and replace exhibit fragments with figure-label blocks and rebuilt tables, before any translation. Run it first without `--apply`, read the report, then apply:
+   For a PDF source in Study or Publication mode, `prepare` also inventories the exhibits (`analysis/exhibit-inventory.json`) and treats them in the source units: each diagram becomes its source crop plus a figure-label block, each table a rebuilt table. Its decisions are in `analysis/exhibit-retrofit-log.json`, and the `exhibits` summary of its output counts them; read the `unmatched`, `untouched`, and `needs_hand_rebuild` entries, which keep their extracted form and will be flagged at exhibit review.
+
+   A project prepared before `prepare` did this has no inventory. Run `retrofit-exhibits` once, first without `--apply`, read the report, then apply:
 
    ```text
    BTP retrofit-exhibits <project-dir>
    BTP retrofit-exhibits <project-dir> --apply
    ```
 
-   Every run, with or without `--apply`, rewrites `analysis/exhibit-inventory.json`; step 10 needs it. On a book whose exhibit review is already recorded, a new run can make that review stale.
+   Every run, with or without `--apply`, rewrites `analysis/exhibit-inventory.json`. On a book whose exhibit review is already recorded, a new run can make that review stale.
 
 4. For PDF, inspect every page listed in `analysis/visual-summary.json.required_review_pages`:
 
