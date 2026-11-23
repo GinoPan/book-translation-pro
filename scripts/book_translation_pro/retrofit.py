@@ -38,6 +38,28 @@ WORD_RE = re.compile(r"[^\W_]+")
 # A running head or folio: a page number at either end of a short line.
 FOLIO_RE = re.compile(r"^(?:\d{1,4}|\d{1,4}\s+\D{1,60}|\D{1,60}\s+\d{1,4})$")
 MARKER_RE = re.compile(r'<!-- btp:(?:figure-labels|exhibit-table) exhibit="([^"]+)"')
+BLOCK_RE = re.compile(
+    r'<!-- btp:(?P<kind>figure-labels|exhibit-table) exhibit="(?P<key>[^"]+)" -->\n(?P<body>.*?)\n?'
+    r"<!-- /btp:(?P=kind) -->",
+    re.DOTALL,
+)
+LABEL_LINE_RE = re.compile(r"^(\d+)\.\s+(.*\S)\s*$")
+
+
+def exhibit_blocks(text: str) -> list[dict[str, Any]]:
+    """Figure-label blocks and rebuilt tables in a unit, source or translated.
+
+    A label block yields its numbered labels in order; a table block its body.
+    """
+    blocks = []
+    for match in BLOCK_RE.finditer(text):
+        block: dict[str, Any] = {"kind": match["kind"], "key": match["key"], "body": match["body"],
+                                 "span": match.span()}
+        if match["kind"] == "figure-labels":
+            block["labels"] = [m[2] for line in match["body"].splitlines() if (m := LABEL_LINE_RE.match(line))]
+            block["numbers"] = [int(m[1]) for line in match["body"].splitlines() if (m := LABEL_LINE_RE.match(line))]
+        blocks.append(block)
+    return blocks
 
 
 def _plain(line: str) -> str:

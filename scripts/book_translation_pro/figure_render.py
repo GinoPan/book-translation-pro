@@ -408,3 +408,176 @@ def document_body_size(exhibit: dict[str, Any]) -> float:
 
 def _rgb(color: int) -> tuple[float, float, float]:
     return ((color >> 16) & 255) / 255, ((color >> 8) & 255) / 255, (color & 255) / 255
+
+
+# --- rendering a project's translated diagrams --------------------------------------
+
+# Bump when placement or checks change, so cached renders are redone.
+RENDERER_VERSION = 2
+RENDER_REPORT = "qa/figure-render.json"
+
+
+def translated_asset(exhibit: dict[str, Any]) -> str:
+    """Project-relative path of a diagram's translated image (one per page of the exhibit)."""
+    stem = "exhibit-" + exhibit["key"].replace(".", "-").casefold()
+    if exhibit.get("parts", 1) > 1:
+        stem += f"-p{exhibit['part']}"
+    return f"assets/translated/figures/{stem}.png"
+
+
+def render_input_hash(exhibit: dict[str, Any], translations: list[str]) -> str:
+    from .artifacts import hash_data
+
+    return hash_data({"renderer": RENDERER_VERSION, "exhibit": exhibit, "translations": translations})
+
+
+def diagram_blocks(project: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every figure-label block in the target, paired with its inventory diagram.
+
+    The n-th block of an exhibit in reading order is the n-th diagram page of
+    that exhibit.  A block without a diagram to pair with is returned with
+    ``exhibit`` None, so callers report it instead of skipping it.
+    """
+    from .artifacts import load_json
+    from .figures import _target_root
+    from .manifest import load_manifest
+    from .retrofit import exhibit_blocks
+
+    inventory = load_json(project / "analysis" / "exhibit-inventory.json")["exhibits"]
+    pages: dict[str, list[dict[str, Any]]] = {}
+    for exhibit in sorted(inventory, key=lambda item: item["page"]):
+        if exhibit["classification"] == "diagram":
+            pages.setdefault(exhibit["key"], []).append(exhibit)
+    seen: dict[str, int] = {}
+    out = []
+    root = _target_root(project, config)
+    for entry in sorted(load_manifest(project)["units"], key=lambda item: item["order"]):
+        path = root / f"{entry['unit_id']}.md"
+        if not path.is_file():
+            continue
+        for block in exhibit_blocks(path.read_text(encoding="utf-8")):
+            if block["kind"] != "figure-labels":
+                continue
+            index = seen.get(block["key"], 0)
+            seen[block["key"]] = index + 1
+            candidates = pages.get(block["key"], [])
+            out.append({"unit_id": entry["unit_id"], "key": block["key"],
+                        "exhibit": candidates[index] if index < len(candidates) else None,
+                        "translations": block["labels"]})
+    return out
+
+
+def render_project_figures(project: Path, config: dict[str, Any], force: bool = False) -> dict[str, Any]:
+    """Render every translated diagram whose inputs changed; report every result.
+
+    One exhibit's failure is recorded and the others still render: the report,
+    not an exception, is what QA reads.
+    """
+    from .artifacts import atomic_write_json, load_json, safe_project_path
+
+    report_path = project / RENDER_REPORT
+    previous = load_json(report_path).get("renders", {}) if report_path.is_file() else {}
+    source_pdf = safe_project_path(project, config["source"]["path"])
+    renders: dict[str, Any] = {}
+    counts = {"rendered": 0, "cached": 0, "failed": 0}
+    for item in diagram_blocks(project, config):
+        if item["exhibit"] is None:
+            name = f"{item['key']}@{item['unit_id']}"
+            renders[name] = {"key": item["key"], "unit_id": item["unit_id"], "passed": False,
+                             "problems": ["label block has no diagram in the exhibit inventory"]}
+            counts["failed"] += 1
+            continue
+        exhibit = item["exhibit"]
+        asset = translated_asset(exhibit)
+        name = asset.rsplit("/", 1)[1].removesuffix(".png")
+        digest = render_input_hash(exhibit, item["translations"])
+        cached = previous.get(name)
+        if not force and cached and cached.get("input_hash") == digest and (project / asset).is_file():
+            renders[name] = cached
+            counts["cached"] += 1
+            continue
+        try:
+            result = render_diagram(source_pdf, exhibit, item["translations"], project / asset)
+        except BTPError as exc:
+            result = {"key": exhibit["key"], "page": exhibit["page"], "passed": False, "problems": [str(exc)]}
+        result.update(asset=asset, unit_id=item["unit_id"], input_hash=digest)
+        renders[name] = result
+        counts["rendered" if result["passed"] else "failed"] += 1
+    atomic_write_json(report_path, {"schema_version": 1, "renderer": RENDERER_VERSION, "renders": renders})
+    return {"report": RENDER_REPORT, **counts,
+            "failures": {name: r["problems"][:3] for name, r in renders.items() if not r["passed"]}}
+
+
+_TABLE_MARKER_RE = re.compile(r'^<!-- /?btp:exhibit-table(?: exhibit="[^"]+")? -->\n?', re.MULTILINE)
+_LAST_IMAGE_RE = re.compile(r"!\[[^\]]*\]\((?P<path>[^)\s]+)\)\s*$")
+
+
+class ExhibitPublisher:
+    """Turn exhibit markup into what a reader sees.
+
+    Target text: a figure-label block is removed and the image right before it
+    becomes the translated diagram, which must be rendered from exactly these
+    labels and have passed its checks.  Source text (the bilingual original
+    side): the block is removed and the original image stays.  Rebuilt tables
+    lose only their marker comments.  Blocks are paired with diagram pages in
+    reading order, so one publisher must see the units in order.
+    """
+
+    def __init__(self, project: Path, config: dict[str, Any]) -> None:
+        from .artifacts import load_json
+
+        self.project = project
+        inventory_path = project / "analysis" / "exhibit-inventory.json"
+        inventory = load_json(inventory_path)["exhibits"] if inventory_path.is_file() else None
+        self.pages: dict[str, list[dict[str, Any]]] | None = None
+        if inventory is not None:
+            self.pages = {}
+            for exhibit in sorted(inventory, key=lambda item: item["page"]):
+                if exhibit["classification"] == "diagram":
+                    self.pages.setdefault(exhibit["key"], []).append(exhibit)
+        report_path = project / RENDER_REPORT
+        self.renders = load_json(report_path).get("renders", {}) if report_path.is_file() else {}
+        self.seen: dict[str, int] = {}
+
+    def _translated(self, block: dict[str, Any]) -> str:
+        key = block["key"]
+        index = self.seen.get(key, 0)
+        self.seen[key] = index + 1
+        pages = (self.pages or {}).get(key, [])
+        if index >= len(pages):
+            raise BTPError(f"Exhibit {key}: figure-label block has no diagram in analysis/exhibit-inventory.json")
+        exhibit = pages[index]
+        asset = translated_asset(exhibit)
+        render = self.renders.get(asset.rsplit("/", 1)[1].removesuffix(".png"))
+        if (not render or not render.get("passed")
+                or render.get("input_hash") != render_input_hash(exhibit, block["labels"])
+                or not (self.project / asset).is_file()):
+            raise BTPError(f"Exhibit {key} (page {exhibit['page']}) has no passing render of its current labels; "
+                           "run render-figures and qa")
+        return asset
+
+    def _apply(self, text: str, translated: bool) -> str:
+        from .retrofit import exhibit_blocks
+
+        out, cursor = [], 0
+        for block in exhibit_blocks(text):
+            if block["kind"] != "figure-labels":
+                continue
+            start, end = block["span"]
+            before = text[cursor:start]
+            if translated:
+                asset = self._translated(block)
+                image = _LAST_IMAGE_RE.search(before)
+                if not image:
+                    raise BTPError(f"Exhibit {block['key']}: no image right before its figure-label block")
+                before = before[:image.start("path")] + asset + before[image.end("path"):]
+            out.append(before)
+            cursor = end
+        out.append(text[cursor:])
+        return re.sub(r"\n{3,}", "\n\n", _TABLE_MARKER_RE.sub("", "".join(out)))
+
+    def target(self, text: str) -> str:
+        return self._apply(text, translated=True)
+
+    def source(self, text: str) -> str:
+        return self._apply(text, translated=False)

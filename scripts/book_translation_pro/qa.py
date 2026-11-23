@@ -25,7 +25,10 @@ from .publication import (
 )
 from .rights import publication_rights_issues, rights_warning
 from .structure import IMAGE_RE, parse_blocks
+from .exhibits import keeps_source_form
+from .figure_render import RENDER_REPORT, diagram_blocks, render_input_hash, translated_asset
 from .figures import STRUCTURED_RECONSTRUCTION_PREFIXES, run_figure_audit
+from .retrofit import exhibit_blocks
 from .visual import run_visual_qa
 
 
@@ -598,6 +601,154 @@ def _glossary_coverage_checks(
                    f"units that mention it (first: {', '.join(missing[:4])}); the entry is not enforced")
 
 
+# ``source_error_corrected: 3.4% -> 15.2% (exhibit 7.3): rows sum to 15.2%``
+CORRECTION_RE = re.compile(r"^source_error_corrected:\s*(\S+)\s*->\s*(\S+)\s*\(exhibit\s+([^)\s]+)\)\s*:\s*\S")
+_TABLE_ROW_RE = re.compile(r"^\|.*\|\s*$", re.MULTILINE)
+_TABLE_RULE_RE = re.compile(r"^\|(?:\s*:?-+:?\s*\|)+\s*$")
+
+
+def _declared_corrections(observation: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """(printed, corrected, exhibit key) for each declared source misprint correction."""
+    return [match.groups() for issue in map(str, observation.get("source_issues", []))
+            if (match := CORRECTION_RE.match(issue.strip()))]
+
+
+def _correction_notes(target: str) -> tuple[str, dict[str, str]]:
+    """The target without translator's notes set right below a rebuilt table, and
+    those notes by exhibit key (the note quotes the printed value, a number QA
+    must not count as table content)."""
+    notes: dict[str, str] = {}
+    cut: list[tuple[int, int]] = []
+    for block in exhibit_blocks(target):
+        if block["kind"] != "exhibit-table":
+            continue
+        match = re.match(r"\n+((?:>[^\n]*(?:\n|$))+)", target[block["span"][1]:])
+        if match:
+            notes[block["key"]] = match.group(1)
+            cut.append((block["span"][1] + match.start(1), block["span"][1] + match.end(1)))
+    for start, end in reversed(cut):
+        target = target[:start] + target[end:]
+    return target, notes
+
+
+def _corrected_back(tokens: Counter[str], corrections: list[tuple[str, str, str]], key: str | None = None) -> Counter[str]:
+    """Numbers as printed: each declared corrected value turned back into its printed one."""
+    tokens = Counter(tokens)
+    for printed, corrected, exhibit in corrections:
+        if key is None or exhibit == key:
+            fixed, original = _number_tokens(corrected), _number_tokens(printed)
+            if not fixed - tokens:
+                tokens = tokens - fixed + original
+    return tokens
+
+
+def _exhibit_unit_checks(
+    checks: list[dict[str, Any]], unit_id: str, source: str, target: str, observation: dict[str, Any]
+) -> str:
+    """Label blocks and rebuilt tables survive translation in the form the renderer and
+    publication rely on.  Returns the target without misprint notes, for the number check."""
+    source_blocks, target_blocks = exhibit_blocks(source), exhibit_blocks(target)
+    corrections = _declared_corrections(observation)
+    if not source_blocks and not target_blocks and not corrections:
+        return target
+    stripped, notes = _correction_notes(target)
+
+    def kinds(blocks: list[dict[str, Any]]) -> Counter[tuple[str, str]]:
+        return Counter((block["kind"], block["key"]) for block in blocks)
+
+    if kinds(source_blocks) != kinds(target_blocks):
+        missing, extra = kinds(source_blocks) - kinds(target_blocks), kinds(target_blocks) - kinds(source_blocks)
+        _check(checks, "exhibit.blocks", "fail",
+               f"Exhibit blocks changed (missing: {sorted(missing) or 'none'}; unexpected: {sorted(extra) or 'none'}); "
+               "keep every figure-label and exhibit-table block with its markers", unit_id)
+        return stripped
+    for kind_key in kinds(source_blocks):
+        pairs = zip([b for b in source_blocks if (b["kind"], b["key"]) == kind_key],
+                    [b for b in target_blocks if (b["kind"], b["key"]) == kind_key])
+        for src, tgt in pairs:
+            key = src["key"]
+            if src["kind"] == "figure-labels":
+                if tgt["numbers"] != src["numbers"]:
+                    _check(checks, "exhibit.labels", "fail",
+                           f"Exhibit {key}: {len(tgt['numbers'])} numbered labels, the source has {len(src['numbers'])}; "
+                           "translate one label per numbered line", unit_id)
+                    continue
+                for number, original, translated in zip(src["numbers"], src["labels"], tgt["labels"]):
+                    drawn = translated.replace("|", "").strip()
+                    if keeps_source_form(original) and drawn != original:
+                        _check(checks, "exhibit.labels", "fail",
+                               f"Exhibit {key} label {number}: code {original!r} must be copied unchanged, got {drawn!r}", unit_id)
+                    elif not keeps_source_form(original) and drawn == original:
+                        _check(checks, "exhibit.labels", "fail",
+                               f"Exhibit {key} label {number}: {original!r} was left untranslated", unit_id)
+                continue
+            source_rows = [row for row in _TABLE_ROW_RE.findall(src["body"]) if not _TABLE_RULE_RE.match(row)]
+            target_rows = [row for row in _TABLE_ROW_RE.findall(tgt["body"]) if not _TABLE_RULE_RE.match(row)]
+            if len(source_rows) != len(target_rows):
+                _check(checks, "exhibit.table", "fail",
+                       f"Exhibit {key}: {len(target_rows)} table rows, the source has {len(source_rows)}", unit_id)
+            printed = _corrected_back(_number_tokens(tgt["body"]), corrections, key)
+            if printed != _number_tokens(src["body"]):
+                source_numbers, target_numbers = _number_tokens(src["body"]), printed
+                _check(checks, "exhibit.table", "fail",
+                       f"Exhibit {key}: table numbers changed beyond declared corrections (source-only: "
+                       f"{_compact_counter(source_numbers - target_numbers)}; target-only: "
+                       f"{_compact_counter(target_numbers - source_numbers)})", unit_id)
+    for printed, corrected, key in corrections:
+        if printed not in notes.get(key, ""):
+            _check(checks, "exhibit.correction_note", "fail",
+                   f"Correction {printed} -> {corrected} in exhibit {key} needs a translator's note quoting {printed} "
+                   "directly below the table", unit_id)
+    return stripped
+
+
+def _exhibit_book_checks(project: Path, config: dict[str, Any], checks: list[dict[str, Any]],
+                         corrected_keys: set[str]) -> None:
+    """Every translated diagram is rendered from its current labels and passed its
+    checks; totals that do not add up and exhibits left as they were are reported."""
+    inventory_path = project / "analysis" / "exhibit-inventory.json"
+    if not inventory_path.is_file():
+        return
+    inventory = load_json(inventory_path)["exhibits"]
+    report_path = project / RENDER_REPORT
+    renders = load_json(report_path).get("renders", {}) if report_path.is_file() else {}
+    rendered = 0
+    for item in diagram_blocks(project, config):
+        if item["exhibit"] is None:
+            _check(checks, "exhibit.render", "fail",
+                   f"Exhibit {item['key']}: label block has no diagram in the exhibit inventory", item["unit_id"])
+            continue
+        asset = translated_asset(item["exhibit"])
+        render = renders.get(asset.rsplit("/", 1)[1].removesuffix(".png"))
+        if not render or render.get("input_hash") != render_input_hash(item["exhibit"], item["translations"]) \
+                or not (project / asset).is_file():
+            _check(checks, "exhibit.render", "fail",
+                   f"Exhibit {item['key']} (page {item['exhibit']['page']}) is not rendered from its current labels; "
+                   "run render-figures", item["unit_id"])
+        elif not render["passed"]:
+            _check(checks, "exhibit.render", "fail",
+                   f"Exhibit {item['key']} (page {item['exhibit']['page']}) render failed: {'; '.join(render['problems'][:3])}",
+                   item["unit_id"])
+        else:
+            rendered += 1
+    if rendered:
+        _check(checks, "exhibit.render", "pass", f"{rendered} translated diagram(s) rendered and checked")
+    for exhibit in inventory:
+        for total in exhibit.get("checks", {}).get("totals", []):
+            if total["verdict"] == "mismatch" and exhibit["key"] not in corrected_keys:
+                _check(checks, "exhibit.totals", "warn",
+                       f"Exhibit {exhibit['key']} (page {exhibit['page']}): {total['column']} total {total['stated']} "
+                       f"but its rows sum to {total['sum_of_rows']}; correct it with a translator's note "
+                       "(source_error_corrected) or confirm the printed value")
+    log_path = project / "analysis" / "exhibit-retrofit-log.json"
+    if log_path.is_file():
+        left = [f"{d['key']}" + (f"/{d['part']}" if d["part"] > 1 else "")
+                for d in load_json(log_path)["decisions"] if d["status"] in {"unmatched", "untouched"}]
+        if left:
+            _check(checks, "exhibit.review", "warn",
+                   f"{len(left)} exhibit(s) keep their earlier treatment and need review: {', '.join(left)}")
+
+
 def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     manifest = load_manifest(project)
     state = load_state(project)
@@ -621,6 +772,7 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     target_tokens_by_unit: dict[str, Counter[str]] = {}
     source_tokens_by_unit: dict[str, Counter[str]] = {}
     term_units: list[tuple[str, str | None, str, str]] = []
+    corrected_keys: set[str] = set()
     for entry in ordered_units:
         source_file = safe_project_path(project, entry["source_file"])
         target_file = _target_path(project, entry, require_edit)
@@ -673,6 +825,9 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             _check(checks, "observation.invalid", "fail", str(exc), unit_id)
 
         _coverage_checks(checks, unit_id, source, target, observation)
+        numbers_target = _exhibit_unit_checks(checks, unit_id, source, target, observation)
+        corrections = _declared_corrections(observation)
+        corrected_keys.update(key for _printed, _corrected, key in corrections)
         if record.get("status") not in {"completed", "skipped_approved"}:
             _check(checks, "unit.status", "fail",
                    f"Unit status is {record.get('status', 'missing')!r}; run plan and complete it", unit_id)
@@ -710,9 +865,10 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             _check(checks, "structure.code_fences", "fail", "Code fence count changed", unit_id)
 
         source_numbers = _number_tokens(source)
-        target_numbers = _number_tokens(target)
+        # A declared misprint correction is the one number change QA accepts.
+        target_numbers = _corrected_back(_number_tokens(numbers_target), corrections)
         if source_numbers != target_numbers:
-            status, message = _variation_status("content.numbers", unit_id, source, target, observation)
+            status, message = _variation_status("content.numbers", unit_id, source, numbers_target, observation)
             if status == "fail":
                 # Exhibit reconstructions can move numeric anchors (a table
                 # rebuilt beside its caption) into the adjacent unit.  A real
@@ -756,6 +912,7 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
                 _check(checks, "edit.stale", "fail", "Edited output was not recorded against the current draft", unit_id)
 
     _glossary_coverage_checks(checks, glossary, term_units)
+    _exhibit_book_checks(project, config, checks, corrected_keys)
 
     target_root = project / "target" / ("edited" if require_edit else "draft")
     actual_files = {portable_path(path, project): path for path in target_root.glob("unit-*.md")}

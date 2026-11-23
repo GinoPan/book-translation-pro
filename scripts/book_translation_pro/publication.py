@@ -20,6 +20,7 @@ from xml.etree import ElementTree as ET
 from bs4 import BeautifulSoup
 
 from .alignment import create_segment_alignment, render_bilingual_markdown
+from .figure_render import ExhibitPublisher
 from .figures import TARGET_CAPTION_LABELS
 from .artifacts import (
     BTPError,
@@ -2911,7 +2912,7 @@ def prepare_publication_markdown(
     config: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     """Build the deterministic Markdown master, including its rights page."""
-    raw = merge_edited_units(project, config)
+    raw = ExhibitPublisher(project, config).target(merge_edited_units(project, config))
     clean = clean_markdown_for_publication(raw, continuation=_continuation_label(config))
     options = _publication_options(config)
     if options["folio_position"] == "auto":
@@ -3080,6 +3081,11 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
 
     if "bilingual" in requested:
         alignment = create_segment_alignment(project, config)
+        # Translated diagrams on the target side; the original side keeps the source image.
+        publisher = ExhibitPublisher(project, config)
+        for item in sorted(alignment["items"], key=lambda row: row["order"]):
+            item["source_text"] = publisher.source(item["source_text"])
+            item["target_text"] = publisher.target(item["target_text"])
         bilingual_markdown = output_dir / "book-bilingual.md"
         render_bilingual_markdown(alignment, bilingual_markdown)
         bilingual_text = bilingual_markdown.read_text(encoding="utf-8")
