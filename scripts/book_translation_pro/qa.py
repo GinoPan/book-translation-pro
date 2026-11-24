@@ -28,7 +28,7 @@ from .structure import IMAGE_RE, parse_blocks
 from .exhibits import keeps_source_form
 from .figure_render import RENDER_REPORT, diagram_blocks, diagram_render_problems
 from .figures import STRUCTURED_RECONSTRUCTION_PREFIXES, run_figure_audit
-from .retrofit import exhibit_blocks
+from .retrofit import _is_furniture, _is_scrambled, _plain, exhibit_blocks
 from .visual import run_visual_qa
 
 
@@ -422,6 +422,19 @@ def _evidence_issues(observation: dict[str, Any], prefixes: tuple[str, ...] | st
     ]
 
 
+_TERM_EXEMPTION_RE = re.compile(r"^term_not_applicable:\s*(?P<id>[\w.-]+)\s*\((?P<reason>[^)]*\S[^)]*)\)")
+
+
+def _term_exemptions(observation: dict[str, Any]) -> dict[str, str]:
+    """Glossary entries declared not to apply in this unit, with the declared reason:
+    ``term_not_applicable: <entry id> (<reason>)``."""
+    return {
+        match["id"]: match["reason"].strip()
+        for issue in map(str, observation.get("source_issues", []))
+        if (match := _TERM_EXEMPTION_RE.match(issue))
+    }
+
+
 def _has_evidence(observation: dict[str, Any], prefixes: tuple[str, ...] | str) -> bool:
     return bool(_evidence_issues(observation, prefixes))
 
@@ -555,6 +568,24 @@ def has_translator_note(source: str, target: str) -> bool:
         return False
     prose = _HTML_COMMENT_RE.sub("", re.sub(r"```.*?```", "", target, flags=re.DOTALL))
     return bool(_TRANSLATOR_NOTE_RE.search(prose))
+
+
+SCRAMBLED_MIN_TOKENS = 8
+
+
+def _term_source(source: str) -> str:
+    """The source lines a glossary term is checked in: page furniture (running heads,
+    folios, print stamps) and scrambled sideways exhibit text are left out, as the
+    translation leaves them out."""
+    kept = []
+    for line in source.splitlines():
+        plain = _plain(line)
+        # A short sentence of short words ("it is 10 mm.") is not sideways text.
+        scrambled = len(plain.split()) >= SCRAMBLED_MIN_TOKENS and _is_scrambled(plain)
+        if plain and (_is_furniture(plain) or scrambled):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _glossary_coverage_checks(
@@ -928,10 +959,17 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         if _link_urls(source) != _link_urls(target):
             _check(checks, "content.urls", "fail", "URLs changed", unit_id)
 
-        for term in select_entries(glossary, source, entry["book_node_id"]):
-            if not target_matches(term, target):
+        term_source = _term_source(source)
+        exempt = _term_exemptions(observation)
+        for term in select_entries(glossary, term_source, entry["book_node_id"]):
+            if target_matches(term, target):
+                continue
+            if term["id"] in exempt:
+                _check(checks, "terminology.approved", "warn",
+                       f"Approved target for {term['source']!r} declared not applicable: {exempt[term['id']]}", unit_id)
+            else:
                 _check(checks, "terminology.approved", "fail", f"Approved target missing for {term['source']!r}: {term['target']!r}", unit_id)
-        term_units.append((unit_id, entry["book_node_id"], source, target))
+        term_units.append((unit_id, entry["book_node_id"], term_source, target))
         leaked = [line.strip()[:80] for line in target.splitlines() if TOOL_TEXT_RE.match(line)]
         if leaked:
             _check(checks, "content.tool_text", "fail",

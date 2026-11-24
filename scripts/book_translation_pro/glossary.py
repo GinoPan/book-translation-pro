@@ -78,7 +78,9 @@ def _surface_pattern(surface: str, ignore_case: bool = True) -> re.Pattern[str]:
             escaped = re.escape(surface[:-1]) + r"(?:y|ies|y['’]s)"
         elif surface[-1].isalpha():
             escaped += r"(?:s|es|['’]s)?"
-        return re.compile(rf"(?<!\w){escaped}(?!\w)", re.IGNORECASE if ignore_case else 0)
+        # A hyphenated compound is another term: "value" is not in "value-added",
+        # nor "standard work" in "standard work-in-process".
+        return re.compile(rf"(?<![\w-]){escaped}(?![\w]|-\w)", re.IGNORECASE if ignore_case else 0)
     return re.compile(escaped)
 
 

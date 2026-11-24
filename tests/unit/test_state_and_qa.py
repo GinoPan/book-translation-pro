@@ -188,6 +188,34 @@ class StateTests(unittest.TestCase):
             self.assertFalse(report["passed"])
             self.assertIn("content.numbers", [item["id"] for item in report["checks"]])
 
+    def test_a_declared_term_exemption_turns_the_missing_term_into_a_warning(self) -> None:
+        def term_checks(source_issues: list[str]) -> list[tuple[str, str]]:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                config, _ = make_project(root, with_term=True)
+                record_review(root, "terminology", True, "tester", "approved")
+                text = "# 轴承 1\n\n预载为 10 mm。\n"
+                atomic_write_text(root / "target" / "draft" / "unit-0001.md", text)
+                dispatch_unit(root, "unit-0001")
+                record_text_output(root, "unit-0001", "draft")
+                atomic_write_text(root / "target" / "edited" / "unit-0001.md", text)
+                record_text_output(root, "unit-0001", "edit")
+                atomic_write_json(root / "state" / "observations" / "unit-0001.json", {
+                    "schema_version": 1, "new_entries": [], "conflicts": [],
+                    "source_issues": source_issues, "used_glossary_ids": [],
+                })
+                report = run_qa(root, config)
+                return [(item["status"], item["message"]) for item in report["checks"]
+                        if item["id"] == "terminology.approved"]
+
+        self.assertEqual([status for status, _ in term_checks([])], ["fail"])
+        declared = term_checks(["term_not_applicable: preload (index entry omitted by decision)"])
+        self.assertEqual(declared, [("warn", "Approved target for 'bearing preload' declared not applicable: "
+                                             "index entry omitted by decision")])
+        # A declaration without a reason, or naming another entry, excuses nothing.
+        self.assertEqual([status for status, _ in term_checks(["term_not_applicable: preload ()"])], ["fail"])
+        self.assertEqual([status for status, _ in term_checks(["term_not_applicable: other (reason)"])], ["fail"])
+
     def test_publication_qa_blocks_unconfirmed_distribution_rights(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
