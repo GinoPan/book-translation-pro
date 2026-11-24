@@ -69,7 +69,8 @@ QA blocks omitted paragraphs, truncated units, and text left in the source langu
 - Translate each label as the words printed in the figure, as short as the source; never describe the figure or add text that is not on it.
 - Mark where a label may wrap with `|` between words or word groups (`客户|需求`, `价值流|战略`); never inside a word or term. A label with no `|` stays on one line or shrinks.
 - Where the figure stacks separate items in one label (rows of a list, `Cost` / `Throughput Time` / …), start each item on its own line with `||` (`成本||吞吐时间||机器效率`). A bulleted list already gets one item per line.
-- Copy codes, numbers, and symbols that are not words (`FR1`, `PS2`, `M1`, `+`) unchanged.
+- Copy codes, numbers, and symbols that are not words (`FR1`, `PS2`, `M1`, `+`, `R8 … Rn`) unchanged.
+- QA takes a label of one to four capital letters for a code. When it is a word set in capitals (`MAN`, `LEAN`), translate it and declare it in `source_issues` as `label_is_word: <exhibit>#<label number> (<reason>)`, for example `label_is_word: 8.5#11 (cause category "man", not an abbreviation)`.
 
 **Rebuilt tables.** A table between `<!-- btp:exhibit-table exhibit="…" -->` and `<!-- /btp:exhibit-table -->` was rebuilt from the page. Keep the markers, every row and column, and empty cells; translate cell by cell; keep every number exactly as printed.
 

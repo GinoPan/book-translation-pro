@@ -646,6 +646,17 @@ _TABLE_ROW_RE = re.compile(r"^\|.*\|\s*$", re.MULTILINE)
 _TABLE_RULE_RE = re.compile(r"^\|(?:\s*:?-+:?\s*\|)+\s*$")
 
 
+# ``label_is_word: 8.5#11 (MAN is the cause category "man", not an abbreviation)``
+LABEL_WORD_RE = re.compile(r"^label_is_word:\s*(?P<key>[\w.]+)#(?P<number>\d+)\s*\((?P<reason>[^)]*\S[^)]*)\)")
+
+
+def _declared_word_labels(observation: dict[str, Any]) -> dict[tuple[str, int], str]:
+    """Short capitalised labels declared to be words (translated), not codes, with the reason."""
+    return {(match["key"], int(match["number"])): match["reason"].strip()
+            for issue in map(str, observation.get("source_issues", []))
+            if (match := LABEL_WORD_RE.match(issue.strip()))}
+
+
 def _declared_corrections(observation: dict[str, Any]) -> list[tuple[str, str, str]]:
     """(printed, corrected, exhibit key) for each declared source misprint correction."""
     return [match.groups() for issue in map(str, observation.get("source_issues", []))
@@ -712,11 +723,17 @@ def _exhibit_unit_checks(
                            f"Exhibit {key}: {len(tgt['numbers'])} numbered labels, the source has {len(src['numbers'])}; "
                            "translate one label per numbered line", unit_id)
                     continue
+                words = _declared_word_labels(observation)
                 for number, original, translated in zip(src["numbers"], src["labels"], tgt["labels"]):
                     drawn = translated.replace("|", "").strip()
-                    if keeps_source_form(original) and drawn != original:
+                    if keeps_source_form(original) and drawn != original and (key, number) in words:
+                        _check(checks, "exhibit.labels", "warn",
+                               f"Exhibit {key} label {number}: {original!r} declared a word, translated as {drawn!r}: "
+                               f"{words[(key, number)]}", unit_id)
+                    elif keeps_source_form(original) and drawn != original:
                         _check(checks, "exhibit.labels", "fail",
-                               f"Exhibit {key} label {number}: code {original!r} must be copied unchanged, got {drawn!r}", unit_id)
+                               f"Exhibit {key} label {number}: code {original!r} must be copied unchanged, got {drawn!r}; "
+                               f"if it is a word, declare label_is_word: {key}#{number} (<reason>)", unit_id)
                     elif not keeps_source_form(original) and drawn == original:
                         _check(checks, "exhibit.labels", "fail",
                                f"Exhibit {key} label {number}: {original!r} was left untranslated", unit_id)

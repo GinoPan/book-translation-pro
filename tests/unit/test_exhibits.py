@@ -79,6 +79,38 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(sorted(label["text"] for label in exhibit["labels"]),
                              ["Customer Needs", "Feedback", "Strategy Changes"])
 
+    def test_a_title_set_larger_than_the_body_is_a_label_but_body_text_is_not(self) -> None:
+        from book_translation_pro.exhibits import label_lines
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((100, 120), "Value Stream", fontname="hebo", fontsize=14)    # title in the figure
+        page.insert_text((100, 140), "Customer Needs", fontname="helv", fontsize=8)   # ordinary label
+        page.insert_text((100, 160), "the running text", fontname="tiro", fontsize=10)  # body size: prose
+        page.insert_text((100, 175), "a touch larger", fontname="tiro", fontsize=10.3)  # still body-like
+        texts = [line["text"] for line in label_lines(page, fitz.Rect(90, 100, 400, 190), fitz.Rect(0, 0, 0, 0), 10.0)]
+        self.assertEqual(texts, ["Value Stream", "Customer Needs"])
+
+    def test_each_list_item_is_one_label_with_its_wrapped_lines(self) -> None:
+        from book_translation_pro.exhibits import group_labels
+
+        def line(text: str, x: float, y: float) -> dict:
+            return {"text": text, "bbox": fitz.Rect(x, y, x + 120, y + 8), "size": 7.5, "font": "Optima",
+                    "color": 0, "dir": (1, 0)}
+
+        lines = [line("• Use measures that can be understood", 100, 100), line("by all employees.", 105, 109),
+                 line("• Use measures that show employees", 100, 118), line("how their efforts drive", 105, 127),
+                 line("overall success.", 105, 136),
+                 line("• Provide information when needed", 100, 145),          # aligned bullet: a new item
+                 line("FR4—Achieve FR1 through FR3 in spite of", 100, 170), line("variation.", 124, 179),
+                 line("FR5—Identify a problem condition", 100, 188),
+                 line("Value Stream", 100, 210), line("Costs", 100, 219)]      # an ordinary two-line label
+        texts = [g["text"] for g in group_labels(lines, [])]
+        self.assertEqual(texts, ["• Use measures that can be understood by all employees.",
+                                 "• Use measures that show employees how their efforts drive overall success.",
+                                 "• Provide information when needed",
+                                 "FR4—Achieve FR1 through FR3 in spite of variation.",
+                                 "FR5—Identify a problem condition", "Value Stream Costs"])
+
     def test_a_line_or_an_open_path_is_not_a_box(self) -> None:
         document = fitz.open()
         page = document.new_page()
@@ -283,6 +315,29 @@ class RendererRuleTests(unittest.TestCase):
         stem = (P(90, 230), P(90, 250), 5)          # vertical
         shaft_end = (P(94, 241.5), P(96.2, 241.5), 6)  # the top of an arrow shaft starting under the words
         found = figure_render.underlines_of(group, [underline, box_edge, stem, shaft_end])
+        self.assertEqual([(round(r.x0), round(r.x1)) for r in found], [(70, 119)])
+
+    def test_tightly_set_list_items_do_not_clash_but_overlapping_text_does(self) -> None:
+        font = None
+        try:
+            font = fitz.Font(fontfile=figure_render.font_files()[0])
+        except BTPError:
+            self.skipTest("no CJK font installed")
+        rect, size = fitz.Rect(100, 100, 300, 140), 7.5
+        first = figure_render.ink_boxes(["希望为实现目标作出贡献"], rect, 100.0, size, 0, font)[0]
+        tight = figure_render.ink_boxes(["被赋予决策权"], rect, 108.0, size, 0, font)[0]      # 8 pt pitch
+        into = figure_render.ink_boxes(["接受交叉培训"], rect, 105.0, size, 0, font)[0]      # 5 pt pitch
+        self.assertEqual(figure_render.clashes([(1, first, size), (2, tight, size)]), [])
+        self.assertEqual(figure_render.clashes([(1, first, size), (3, into, size)]), [(1, 3)])
+
+    def test_the_top_of_a_box_narrower_than_its_title_is_not_an_underline(self) -> None:
+        line = {"bbox": fitz.Rect(70, 233, 120, 242), "size": 8}
+        P = fitz.Point
+        top, left, right = (P(74, 241.5), P(110, 241.5), 3), (P(74, 241.5), P(74, 300), 3), (P(110, 241.5), P(110, 300), 3)
+        self.assertEqual(figure_render.underlines_of({"lines": [line]}, [top, left, right]), [])
+        # An underline that an arrow merely touches at one end is still an underline.
+        underline, arrow = (P(70, 241.5), P(119, 241.5), 4), (P(119, 241.5), P(119, 280), 5)
+        found = figure_render.underlines_of({"lines": [line]}, [underline, arrow])
         self.assertEqual([(round(r.x0), round(r.x1)) for r in found], [(70, 119)])
 
     def test_an_underline_is_painted_out_in_the_colour_under_it(self) -> None:
@@ -776,6 +831,25 @@ class ExhibitQATests(unittest.TestCase):
     def test_changed_code_and_untranslated_label_fail(self) -> None:
         fails = self._fails(LABELS_SOURCE, _labels_target("Customer Needs", "FR一", "反馈"))
         self.assertEqual(len([f for f in fails if f.startswith("exhibit.labels")]), 2, fails)
+
+    def test_indexed_symbol_runs_are_codes_but_words_are_not(self) -> None:
+        from book_translation_pro.exhibits import keeps_source_form
+        self.assertTrue(all(map(keeps_source_form, ["R8...... Rn", "V1 … Vn", "$V1", "WIP", "FR2", "–"])))
+        self.assertFalse(any(map(keeps_source_form, ["Rn Is Here", "Go To", "Customer Needs", "Value"])))
+
+    def test_a_short_capitalised_label_translated_as_a_word_needs_a_declaration(self) -> None:
+        source = LABELS_SOURCE.replace("3. Feedback", "3. MAN")
+        target = _labels_target("客户|需求", "FR1", "人员")
+        self.assertTrue(any("code 'MAN' must be copied unchanged" in f for f in self._fails(source, target)))
+        declared = ["label_is_word: 1.1#3 (the cause category man, not an abbreviation)"]
+        checks: list[dict] = []
+        _exhibit_unit_checks(checks, "unit-0001", source, target, {"source_issues": declared})
+        self.assertEqual([(c["status"], c["message"]) for c in checks if c["id"] == "exhibit.labels"],
+                         [("warn", "Exhibit 1.1 label 3: 'MAN' declared a word, translated as '人员': "
+                                   "the cause category man, not an abbreviation")])
+        # A declaration for another label, or with no reason, excuses nothing.
+        for issues in (["label_is_word: 1.1#2 (x)"], ["label_is_word: 1.1#3 ()"]):
+            self.assertTrue(self._fails(source, target, issues), issues)
 
     def test_figure_audit_sees_the_image_across_a_long_label_block(self) -> None:
         from book_translation_pro.figures import _caption_images

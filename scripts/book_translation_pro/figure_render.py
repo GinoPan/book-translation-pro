@@ -186,10 +186,16 @@ def hits(rect: Any, points: PointGrid) -> bool:
     return points.within(rect)
 
 
+def _corner(point: Any, pieces: list[tuple[Any, Any, int]]) -> bool:
+    """A point where a non-horizontal piece of line art ends: a box corner, not an underline's free end."""
+    return any(abs(c.y - d.y) >= 0.3 and min(abs(point - c), abs(point - d)) < 0.5 for c, d, _order in pieces)
+
+
 def underlines_of(group: dict[str, Any], pieces: list[tuple[Any, Any, int]]) -> list[Any]:
     """Horizontal pieces lying under this label's own lines (an underlined word or
     heading): they belong to the text and go with it.  A box edge or a rule runs past
-    the text it sits under, so it is never taken."""
+    the text it sits under, so it is never taken; nor is the top edge of a box
+    narrower than the title above it, whose two ends are corners."""
     found = []
     for line in group["lines"]:
         box, size = line["bbox"], line["size"]
@@ -199,7 +205,8 @@ def underlines_of(group: dict[str, Any], pieces: list[tuple[Any, Any, int]]) -> 
             if (abs(a.y - b.y) < 0.3 and zone_y0 <= a.y <= zone_y1
                     and zone_x0 <= min(a.x, b.x) and max(a.x, b.x) <= zone_x1
                     # an underline spans at least a word; an arrow shaft's end does not
-                    and abs(a.x - b.x) >= 1.5 * size):
+                    and abs(a.x - b.x) >= 1.5 * size
+                    and not (_corner(a, pieces) and _corner(b, pieces))):
                 found.append(_fitz().Rect(min(a.x, b.x), a.y, max(a.x, b.x), a.y))
     return found
 
@@ -440,6 +447,17 @@ def ink_boxes(lines: list[str], rect: Any, top: float, size: float, align: int, 
     return boxes
 
 
+def clashes(drawn: list[tuple[int, Any, float]]) -> list[tuple[int, int]]:
+    """Pairs of labels whose drawn lines overlap.  Each line is compared by its em box: the
+    ink margin keeps text off a rule, but two tightly set list items whose margins touch
+    do not collide."""
+    def em(box: Any, size: float) -> Any:
+        return box + (0.2, INK_MARGIN * size + 0.2, -0.2, -INK_MARGIN * size - 0.2)
+
+    return sorted({(a, b) for a, box, size in drawn for b, other, other_size in drawn
+                   if a < b and em(box, size).intersects(em(other, other_size))})
+
+
 def ink_height(count: int, size: float) -> float:
     return (count - 1) * size * LINE_HEIGHT + size
 
@@ -575,7 +593,7 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
                 if cap < plans[id(group)].get("size", cap):
                     plans[id(group)] = plan_for(group, target, max_size=cap)
         ink: list[tuple[Any, float]] = []
-        drawn_by: list[tuple[int, Any]] = []
+        drawn_by: list[tuple[int, Any, float]] = []
         new_patches: list[Any] = []
         for group, target in changed:
             name = "zhb" if "Bold" in group["font"] else "zh"
@@ -585,7 +603,7 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
                 rows.append({"source": group["text"], "target": target.replace("|", ""), "status": "does_not_fit"})
                 continue
             boxes_drawn = ink_boxes(plan["lines"], plan["rect"], plan["top"], plan["size"], align, fonts.objects[name])
-            drawn_by += [(id(group), box) for box in boxes_drawn]
+            drawn_by += [(id(group), box, plan["size"]) for box in boxes_drawn]
             if patches[id(group)]:
                 for box in boxes_drawn:
                     if hits(box, points):
@@ -605,15 +623,14 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
         # A number or code the translation keeps is not source text left behind.
         leftovers = [g["text"] for g, t in changed
                      if any(l["text"] in left and l["text"] not in t.replace("|", "") for l in g["lines"] if len(l["text"]) > 3)]
-        clashes = sorted({(a, b) for a, box in drawn_by for b, other in drawn_by
-                          if a < b and box.intersects(other + (0.2, 0.2, -0.2, -0.2))})
+        overlapping = clashes(drawn_by)
         destination.parent.mkdir(parents=True, exist_ok=True)
         page.get_pixmap(dpi=RENDER_DPI, clip=out, alpha=False).save(destination)
     names = {id(g): g["text"] for g in groups}
     problems = [f"{row['source']} ({row['status']})" for row in rows if row["status"] != "ok"]
     problems += [f"line cut without text near ({round(p.x)}, {round(p.y)})" for p in gaps[:5]]
     problems += [f"source text left: {text}" for text in leftovers]
-    problems += [f"labels overlap: {names[a]} / {names[b]}" for a, b in clashes]
+    problems += [f"labels overlap: {names[a]} / {names[b]}" for a, b in overlapping]
     problems += [f"underline kept (another line crosses it) near ({round(u.x0)}, {round(u.y0)})" for u in kept_underlines]
     return {
         "key": exhibit["key"], "page": exhibit["page"], "asset": str(destination), "labels": len(groups),
@@ -635,7 +652,7 @@ def _rgb(color: int) -> tuple[float, float, float]:
 # --- rendering a project's translated diagrams --------------------------------------
 
 # Bump when placement or checks change, so cached renders are redone.
-RENDERER_VERSION = 6
+RENDERER_VERSION = 7
 RENDER_REPORT = "qa/figure-render.json"
 
 
