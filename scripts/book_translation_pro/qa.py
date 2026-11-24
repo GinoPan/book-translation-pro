@@ -11,7 +11,7 @@ from typing import Any
 
 from .artifacts import BTPError, atomic_write_json, atomic_write_text, hash_data, load_json, portable_path, safe_project_path, sha256_file, validate_schema
 from .exceptions import approved_exception_ids
-from .glossary import entry_matches, load_effective_glossary, select_entries, target_matches
+from .glossary import build_ledger, entry_matches, load_effective_glossary, select_entries, target_matches
 from .manifest import load_manifest, validate_manifest_sources
 from .config import config_drifted
 from .state import load_state, now_utc, recorded_dependencies, save_state, unit_dependencies
@@ -28,6 +28,7 @@ from .structure import IMAGE_RE, parse_blocks
 from .exhibits import keeps_source_form
 from .figure_render import RENDER_REPORT, diagram_blocks, diagram_render_problems
 from .figures import STRUCTURED_RECONSTRUCTION_PREFIXES, run_figure_audit
+from .quality import quality_checks
 from .retrofit import _is_furniture, _is_scrambled, _plain, exhibit_blocks
 from .visual import run_visual_qa
 
@@ -376,6 +377,7 @@ TRUNCATION_WARN_RATIO = 0.7
 EXPANSION_WARN_RATIO = 2.0
 COPIED_BLOCK_MIN_WORDS = 6
 COPIED_SHARE_FAIL = 0.5
+EXCUSED_SHARE_WARN = 0.2
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?…])\s+|(?<=[。！？])")
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)])\s+", re.MULTILINE)
 
@@ -788,6 +790,23 @@ def _exhibit_review_checks(project: Path, config: dict[str, Any], checks: list[d
                "The exhibits checkpoint was approved for a different exhibit review; approve the current one")
 
 
+def _translation_review_checks(project: Path, config: dict[str, Any], state: dict[str, Any],
+                               checks: list[dict[str, Any]]) -> None:
+    """For a project that carries the translation_review checkpoint: the recorded review
+    is current, covers the selected units, meets the bar, and is the one approved."""
+    from .translation_review import CHECKPOINT, RECORD, problems
+
+    review = next((item for item in state.get("human_reviews", []) if item["checkpoint"] == CHECKPOINT), None)
+    if review is None or review["status"] == "not_required":
+        return
+    for check_id, status, message in problems(project, config):
+        _check(checks, check_id, status, message)
+    if review["status"] == "approved" and (project / RECORD).is_file() and \
+            review.get("evidence_hashes", {}).get("translation_review") != sha256_file(project / RECORD):
+        _check(checks, "translation_review.approval", "fail",
+               "The translation_review checkpoint was approved for a different review; approve the current one")
+
+
 def _exhibit_book_checks(project: Path, config: dict[str, Any], checks: list[dict[str, Any]],
                          corrected_keys: set[str]) -> None:
     """Every translated diagram is rendered from its current labels and passed its
@@ -851,6 +870,7 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     target_tokens_by_unit: dict[str, Counter[str]] = {}
     source_tokens_by_unit: dict[str, Counter[str]] = {}
     term_units: list[tuple[str, str | None, str, str]] = []
+    quality_units: list[tuple[str, str, str, dict[str, Any]]] = []
     corrected_keys: set[str] = set()
     for entry in ordered_units:
         source_file = safe_project_path(project, entry["source_file"])
@@ -904,6 +924,7 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             _check(checks, "observation.invalid", "fail", str(exc), unit_id)
 
         _coverage_checks(checks, unit_id, source, target, observation)
+        quality_units.append((unit_id, source, target, observation))
         numbers_target = _exhibit_unit_checks(checks, unit_id, source, target, observation)
         corrections = _declared_corrections(observation)
         corrected_keys.update(key for _printed, _corrected, key in corrections)
@@ -1003,6 +1024,20 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
                 _check(checks, "edit.stale", "fail", "Edited output was not recorded against the current draft", unit_id)
 
     _glossary_coverage_checks(checks, glossary, term_units)
+    # An excuse note turns the paragraph, length, and number checks into warnings for the
+    # whole unit.  Measured on a finished book, that hid most planted omissions in the
+    # units that had one; say how far the gate is weakened instead of passing quietly.
+    excused = [uid for uid, _s, _t, obs in quality_units if _has_evidence(obs, NUMERIC_EVIDENCE_PREFIXES)]
+    if quality_units and len(excused) / len(quality_units) >= EXCUSED_SHARE_WARN:
+        _check(checks, "content.excused_units", "warn",
+               f"{len(excused)} of {len(quality_units)} units record a reflow or reconstruction note, so their "
+               "paragraph, length, and number checks only warn; omissions there are left to the translation review")
+    ledger = build_ledger(project, [entry["unit_id"] for entry in ordered_units])
+    signals = quality_checks(
+        lambda check_id, status, message, unit_id=None: _check(checks, check_id, status, message, unit_id),
+        quality_units, config, glossary, ledger)
+    atomic_write_json(project / "qa" / "translation-signals.json", {"schema_version": 1, **signals})
+    _translation_review_checks(project, config, state, checks)
     _exhibit_book_checks(project, config, checks, corrected_keys)
 
     target_root = project / "target" / ("edited" if require_edit else "draft")

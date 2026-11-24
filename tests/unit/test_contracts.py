@@ -93,6 +93,16 @@ def samples() -> dict[str, dict]:
                        "image": "exhibit-1-1.png", "auto_problems": [], "corrections": [],
                        "verdict": "ok", "notes": ""}],
         },
+        "translation-review.schema.json": {
+            "schema_version": 1, "reviewer": "reviewer-model", "reviewed_at": "2026-11-24T00:00:00Z",
+            "scope": "sample", "chapters": {"Chapter 1": {"units": 3, "source_words": 2400}},
+            "items": [{"unit_id": "unit-0001", "chapter": "Chapter 1", "source_words": 800,
+                       "reasons": ["sample of its chapter"], "evidence": digest, "verdict": "findings",
+                       "findings": [{"category": "accuracy.omission", "severity": "major", "status": "fixed",
+                                     "cause": "sentence-dropped", "source_excerpt": "The second step follows.",
+                                     "target_excerpt": "", "note": "The sentence is missing.",
+                                     "fix": "第二步随后进行。"}]}],
+        },
         "publication-review.schema.json": {
             "schema_version": 1, "candidate_sha256": digest, "clean_master_sha256": digest,
             "reviewer": "tester", "reviewed_at": "2026-09-08T00:00:00Z",

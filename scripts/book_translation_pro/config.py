@@ -36,6 +36,9 @@ COMMON_DEFAULTS: dict[str, Any] = {
     "style_guide": {"template": "general"},
     "context_capsule": {"enabled": True, "max_characters": 1800},
     "passes": {"edit": True, "visual_qa": True, "completeness_qa": True},
+    # The translation review (references/translation-quality.md): which units an
+    # independent reviewer reads, and the most weighted findings per 1,000 source words.
+    "quality": {"review_scope": "none", "review_sample_share": 0.1, "max_penalty_per_1000_words": 10},
     "visual": {
         "renderer": "auto",
         "render_dpi": 180,
@@ -77,17 +80,20 @@ MODE_DEFAULTS: dict[str, dict[str, Any]] = {
         "visual": {"minimum_review_risk": 3},
     },
     "study": {
-        "execution": {"checkpoints": ["terminology", "visual_exceptions", "source_readiness", "exhibits"]},
+        "execution": {"checkpoints": ["terminology", "visual_exceptions", "source_readiness", "exhibits", "translation_review"]},
         "terminology": {"bootstrap_samples": 7, "require_review_before_translation": True},
         "passes": {"edit": True, "visual_qa": True},
+        "quality": {"review_scope": "sample"},
         "visual": {"minimum_review_risk": 2},
     },
     "publication": {
         "execution": {
-            "checkpoints": ["terminology", "visual_exceptions", "source_readiness", "exhibits", "publication_signoff"]
+            "checkpoints": ["terminology", "visual_exceptions", "source_readiness", "exhibits", "translation_review",
+                            "publication_signoff"]
         },
         "terminology": {"bootstrap_samples": 12, "require_review_before_translation": True},
         "passes": {"edit": True, "visual_qa": True},
+        "quality": {"review_scope": "all", "max_penalty_per_1000_words": 5},
         "visual": {"minimum_review_risk": 0},
     },
 }

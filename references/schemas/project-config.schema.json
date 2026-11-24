@@ -81,7 +81,7 @@
         "checkpoints": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"enum": ["preflight", "terminology", "visual_exceptions", "source_readiness", "exhibits", "publication_signoff"]}
+          "items": {"enum": ["preflight", "terminology", "visual_exceptions", "source_readiness", "exhibits", "translation_review", "publication_signoff"]}
         }
       },
       "additionalProperties": false
@@ -130,6 +130,15 @@
         "edit": {"type": "boolean"},
         "visual_qa": {"type": "boolean"},
         "completeness_qa": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "quality": {
+      "type": "object",
+      "properties": {
+        "review_scope": {"enum": ["none", "sample", "all"]},
+        "review_sample_share": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "max_penalty_per_1000_words": {"type": "number", "minimum": 0, "maximum": 100}
       },
       "additionalProperties": false
     },

@@ -1,0 +1,312 @@
+"""Translation quality rules that hold for any book: language profiles, rule checks, and
+the signals that decide which units an independent reviewer reads first.
+
+Measured on a finished book before being made rules (see references/translation-quality.md):
+
+- Repeated sentences and Chinese typography are exact, so they are checks.
+- A name printed in English in some units and translated in others is a strong
+  signal but not proof (a citation keeps the author's name), so it is one warning.
+- Sentence-count and length ratios swing widely with tables, lists, and indexes,
+  so they never block; they rank units for the review instead.
+- Abbreviations kept in Latin letters were rejected as an omission anchor: capitals
+  in headings look like abbreviations, and terms such as MBA are rightly translated.
+"""
+
+from __future__ import annotations
+
+import re
+from collections import Counter
+from typing import Any, Iterable
+
+from .glossary import entry_matches, target_matches
+
+CJK = "一-鿿㐀-䶿"
+# Units are compared as (unit_id, source, target, observation).
+Unit = tuple[str, str, str, dict[str, Any]]
+
+# --- language profiles --------------------------------------------------------------------
+# A profile holds what depends on the target language.  Checks a profile lacks are
+# reported as not run, never passed silently.
+PROFILES: dict[str, dict[str, Any]] = {
+    "zh": {
+        "name": "Chinese",
+        "sentence_end": "。！？",
+        "typography": {
+            # Half-width , ; : ! ? set between Chinese characters.
+            "half_width_punctuation": re.compile(rf"[{CJK}][,;:!?](?=\s*[{CJK}])"),
+            # The same full-width mark twice, or two different ones together (，。).
+            "doubled_punctuation": re.compile(r"([，。；：、！？])\1|[，；：、][，。；：、]|。[，；：、]"),
+            # A space between two Chinese characters (an extraction or typing slip).
+            "space_between_characters": re.compile(rf"[{CJK}] +(?=[{CJK}])"),
+        },
+        "paired": (("“", "”"), ("（", "）"), ("《", "》")),
+        # Expected sentences in the target per source sentence; below this the unit is
+        # read first by the reviewer (a ranking signal, not a check).
+        "sentence_ratio_signal": 0.6,
+    },
+}
+
+
+def profile_for(language: str) -> dict[str, Any] | None:
+    """The profile of a target language tag (``zh-Hans`` → ``zh``), or None."""
+    return PROFILES.get(str(language).lower().split("-")[0].split("_")[0])
+
+
+# --- text pieces ---------------------------------------------------------------------------
+_SENTENCE_RE = re.compile(r"(?<=[.!?…])\s+|(?<=[。！？])")
+_EMPHASIS_RE = re.compile(r"[*_`\\]+")
+_SPACE_RE = re.compile(r"\s+")
+REPEAT_MIN_WEIGHT = 8          # about 13 Chinese characters or 8 English words
+JOIN_WINDOW = 3                # sentences on each side of a join between units
+
+
+def _prose(markdown: str) -> list[str]:
+    from .qa import _prose_blocks
+
+    return _prose_blocks(markdown)
+
+
+def _weight(text: str) -> float:
+    from .qa import _prose_weight
+
+    return _prose_weight(text)
+
+
+_TRAILING_RE = re.compile(r"[.。!！?？;；:：,，]+$")
+
+
+def sentences(markdown: str) -> list[str]:
+    """Normalised sentences of the prose blocks, in order (emphasis and the closing
+    punctuation dropped, spacing collapsed, so two copies of a sentence compare equal)."""
+    out = []
+    for block in _prose(markdown):
+        for piece in _SENTENCE_RE.split(block):
+            piece = _TRAILING_RE.sub("", _SPACE_RE.sub(" ", _EMPHASIS_RE.sub("", piece)).strip()).strip()
+            if piece:
+                out.append(piece)
+    return out
+
+
+def _long(pieces: Iterable[str]) -> list[str]:
+    return [piece for piece in pieces if _weight(piece) >= REPEAT_MIN_WEIGHT]
+
+
+def _target_repeats(pieces: list[str]) -> Counter[str]:
+    return Counter({piece: n - 1 for piece, n in Counter(pieces).items() if n > 1})
+
+
+def _source_repeats(source: str) -> int:
+    """Repeats in the source, counted on its joined text: a copy that extraction wrapped
+    across two lines or blocks, or printed without its full stop, still counts."""
+    joined = " ".join(sentences(source))
+    return sum(joined.count(piece) - 1 for piece in set(_long(sentences(source))) if joined.count(piece) > 1)
+
+
+# --- checks ---------------------------------------------------------------------------------
+
+def repeated_text(units: list[Unit]) -> list[dict[str, Any]]:
+    """Sentences the target repeats more often than the source repeats any: within a unit,
+    or on both sides of a join between two units (a passage translated twice)."""
+    findings = []
+    previous: tuple[str, list[str]] | None = None
+    for unit_id, source, target, _observation in units:
+        target_long = _long(sentences(target))
+        repeats = _target_repeats(target_long)
+        if sum(repeats.values()) > _source_repeats(source):
+            findings.append({"unit_id": unit_id, "where": "within the unit", "count": sum(repeats.values()),
+                             "example": next(iter(repeats))[:60]})
+        if previous is not None:
+            target_join = set(previous[1][-JOIN_WINDOW:]) & set(target_long[:JOIN_WINDOW])
+            # Excused only when the source itself repeats across the two units.
+            across = _source_repeats(previous[0] + "\n\n" + source) - _source_repeats(previous[0]) - _source_repeats(source)
+            if target_join and across <= 0:
+                findings.append({"unit_id": unit_id, "where": "across the join with the previous unit",
+                                 "count": len(target_join), "example": next(iter(target_join))[:60]})
+        previous = (source, target_long)
+    return findings
+
+
+def typography_issues(target: str, profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Typography slips by kind, with a count and the first example."""
+    from .qa import _table_cells
+
+    issues: dict[str, dict[str, Any]] = {}
+    text = "\n".join(_prose(target) + _table_cells(target))
+    for kind, pattern in profile["typography"].items():
+        found = [match.group(0) for match in pattern.finditer(text)]
+        if found:
+            issues[kind] = {"count": len(found), "example": found[0]}
+    for opening, closing in profile["paired"]:
+        if text.count(opening) != text.count(closing):
+            issues[f"unpaired {opening}{closing}"] = {
+                "count": abs(text.count(opening) - text.count(closing)),
+                "example": f"{text.count(opening)} {opening} / {text.count(closing)} {closing}"}
+    return issues
+
+
+_NAME_RE = re.compile(r"(?<=[a-z,;] )([A-Z][a-z]{2,})\b")
+_WORD_RE = re.compile(r"(?<![\w'’-])([A-Za-z][a-z]+)(?![\w-])")
+NAME_MIN_UNITS = 3
+NAME_MIN_SIDE = 2
+
+
+def name_candidates(sources: list[str]) -> Counter[str]:
+    """Proper names in the source: capitalised words used mid-sentence that the book
+    never writes in lower case, with how often they occur mid-sentence."""
+    book = "\n".join(sources)
+    lower = {word for word in _WORD_RE.findall(book) if word[0].islower()}
+    found = Counter(_NAME_RE.findall(book))
+    return Counter({name: n for name, n in found.items() if name.lower() not in lower and n >= 2})
+
+
+def _gloss_free(target: str, name: str) -> str:
+    """The target without parenthesised glosses of the name (戴明（Deming）keeps it as a gloss)."""
+    return re.sub(rf"[（(][^）)]*{re.escape(name)}[^）)]*[）)]", "", target)
+
+
+def name_consistency(units: list[Unit], covered: Iterable[dict[str, Any]] = ()) -> list[dict[str, Any]]:
+    """Names printed in English in some units and not in others.  Names that a glossary or
+    ledger entry covers are left to that entry's own check."""
+    covered = list(covered)
+    texts = [(unit_id, "\n".join(_prose(source)), "\n".join(_prose(target)))
+             for unit_id, source, target, observation in units
+             if not any(str(issue).startswith("untranslated_by_design") for issue in observation.get("source_issues", []))]
+    out = []
+    for name in name_candidates([source for _, source, _ in texts]):
+        if any(entry_matches(entry, name) for entry in covered):
+            continue
+        pattern = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+        mentioning = [(unit_id, target) for unit_id, source, target in texts if pattern.search(source)]
+        if len(mentioning) < NAME_MIN_UNITS:
+            continue
+        english = [unit_id for unit_id, target in mentioning if pattern.search(_gloss_free(target, name))]
+        other = [unit_id for unit_id, _ in mentioning if unit_id not in english]
+        if len(english) >= NAME_MIN_SIDE and len(other) >= NAME_MIN_SIDE:
+            out.append({"name": name, "units": len(mentioning), "english": english, "translated": other})
+    # The most-mentioned names first: they are the ones a reader notices.
+    return sorted(out, key=lambda item: (-item["units"], item["name"]))
+
+
+def ledger_checks(units: list[Unit], ledger: dict[str, Any], glossary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Units whose source mentions a recorded rendering but whose target does not use it.
+    An approved glossary entry for the same source is enforced by the glossary check."""
+    approved = [entry for entry in glossary.get("entries", []) if entry["status"] == "approved"]
+    out = []
+    for entry in ledger.get("entries", []):
+        if len(entry["targets"]) != 1 or any(entry_matches(item, entry["source"]) for item in approved):
+            continue
+        rule = {"source": entry["source"], "aliases": [], "target": entry["targets"][0]}
+        missing = [unit_id for unit_id, source, target, _ in units
+                   if entry_matches(rule, "\n".join(_prose(source))) and not target_matches(rule, target)]
+        if missing:
+            out.append({"source": entry["source"], "target": rule["target"], "units": missing})
+    return out
+
+
+# --- review priority signals --------------------------------------------------------------
+
+def unit_signals(source: str, target: str, profile: dict[str, Any] | None) -> list[str]:
+    """Reasons to read this unit first in a review.  They rank; they never block."""
+    from .qa import TRUNCATION_WARN_RATIO
+
+    reasons = []
+    source_weight = sum(map(_weight, _prose(source)))
+    if source_weight >= 40:
+        ratio = sum(map(_weight, _prose(target))) / source_weight
+        if ratio < TRUNCATION_WARN_RATIO + 0.1:
+            reasons.append(f"target is {ratio:.0%} of the source length")
+    if profile:
+        source_count = len(_long(sentences(source)))
+        target_count = len([s for s in sentences(target) if _weight(s) >= 2])
+        if source_count >= 8 and target_count / source_count < profile["sentence_ratio_signal"]:
+            reasons.append(f"{target_count} target sentences for {source_count} source sentences")
+    return reasons
+
+
+# --- glossary candidates at prepare -----------------------------------------------------------
+_STOP = set("""a an and are as at be been but by can could did do does each for from had has have he her his
+how if in into is it its may more most must no not of on one or our out over she should so some such than that
+the their them then there these they this those through to two up us was we were what when where which while
+who will with would you your also other only many much very any all both same new own about after before
+between under first second third""".split())
+_PHRASE_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'-]*")
+CANDIDATE_MIN_COUNT = 3
+CANDIDATE_MIN_UNITS = 2
+
+
+def term_candidates(sources: dict[str, str], limit: int) -> dict[str, list[dict[str, Any]]]:
+    """Recurring names and two- and three-word phrases across the whole book, for the
+    glossary author to consider beside the sampled units."""
+    phrases: Counter[str] = Counter()
+    where: dict[str, set[str]] = {}
+    for unit_id, text in sources.items():
+        for block in _prose(text):
+            for piece in _SENTENCE_RE.split(block):
+                words = [w.lower() for w in _PHRASE_WORD_RE.findall(piece)]
+                for size in (2, 3):
+                    for start in range(len(words) - size + 1):
+                        gram = words[start:start + size]
+                        if gram[0] in _STOP or gram[-1] in _STOP or any(len(w) < 3 for w in gram):
+                            continue
+                        phrase = " ".join(gram)
+                        phrases[phrase] += 1
+                        where.setdefault(phrase, set()).add(unit_id)
+    ranked = [(phrase, n) for phrase, n in phrases.most_common()
+              if n >= CANDIDATE_MIN_COUNT and len(where[phrase]) >= CANDIDATE_MIN_UNITS]
+    # A two-word phrase that is only ever part of one three-word phrase adds nothing.
+    kept = [(p, n) for p, n in ranked if not (p.count(" ") == 1 and any(
+        q.count(" ") == 2 and p in q and m == n for q, m in ranked))]
+    names = name_candidates(list(sources.values()))
+    return {
+        "phrases": [{"source": p, "count": n, "units": len(where[p])} for p, n in kept[:limit]],
+        "names": [{"source": name, "count": n} for name, n in names.most_common(limit)],
+    }
+
+
+# --- QA entry point ----------------------------------------------------------------------------
+
+def quality_checks(check: Any, units: list[Unit], config: dict[str, Any], glossary: dict[str, Any],
+                   ledger: dict[str, Any]) -> dict[str, Any]:
+    """Run the rule checks over the translated units, reporting through ``check(id, status,
+    message, unit_id=None)``.  Returns the details for the signals report."""
+    profile = profile_for(config["target"]["language"])
+    repeats = repeated_text(units)
+    for finding in repeats:
+        check("content.repeated_text", "fail",
+              f"{finding['count']} sentence(s) repeated {finding['where']} where the source has no repeat; "
+              f"first: {finding['example']!r}", finding["unit_id"])
+    typography: dict[str, Any] = {}
+    if profile:
+        for unit_id, _source, target, _observation in units:
+            issues = typography_issues(target, profile)
+            if issues:
+                typography[unit_id] = issues
+                summary = "; ".join(f"{kind} ×{item['count']} ({item['example']!r})" for kind, item in issues.items())
+                check("style.typography", "warn", f"{profile['name']} typography: {summary}", unit_id)
+    else:
+        check("style.typography", "warn",
+              f"No typography profile for target language {config['target']['language']!r}; typography was not checked")
+    covered = [entry for entry in glossary.get("entries", []) if entry["status"] != "rejected"]
+    covered += [{"source": entry["source"], "aliases": []} for entry in ledger.get("entries", [])]
+    names = name_consistency(units, covered)
+    if names:
+        listed = "; ".join(f"{item['name']} (English in {len(item['english'])} of {item['units']} units, "
+                           f"e.g. {', '.join(item['english'][:3])})" for item in names[:12])
+        check("terminology.name_consistency", "warn",
+              f"{len(names)} name(s) appear in English in some units and not in others: {listed}"
+              + (f" (+{len(names) - 12} more in qa/translation-signals.json)" if len(names) > 12 else "")
+              + "; record one rendering per name in the glossary or ledger")
+    for conflict in [entry for entry in ledger.get("entries", []) if len(entry["targets"]) > 1]:
+        check("terminology.ledger_conflict", "warn",
+              f"{conflict['source']!r} was recorded with {len(conflict['targets'])} renderings "
+              f"({' / '.join(conflict['targets'])}) in {', '.join(conflict['units'][:4])}; choose one")
+    for item in ledger_checks(units, ledger, glossary):
+        for unit_id in item["units"]:
+            check("terminology.ledger", "warn",
+                  f"{item['source']!r} is recorded as {item['target']!r} in the ledger but this unit does not use it",
+                  unit_id)
+    if ledger.get("skipped"):
+        check("terminology.ledger_entries", "warn",
+              f"{ledger['skipped']} observation new_entries were not usable (each needs source, target, and category)")
+    return {"profile": profile["name"] if profile else None, "typography": typography, "names": names,
+            "repeated_text": repeats}

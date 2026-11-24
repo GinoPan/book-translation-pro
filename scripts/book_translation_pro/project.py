@@ -307,6 +307,11 @@ def _refresh_config(project: Path, resolved: dict[str, Any], config_hash: str, m
                 # The units were prepared, and may be translated, before this gate existed.
                 status, notes = "not_required", ("Units were prepared before the source readiness gate; "
                                                  "run `source-readiness` to check them anyway.")
+            elif name == "translation_review":
+                # Translated before the review existed: still unreviewed, so pending.
+                from .translation_review import default_status
+
+                status, notes = default_status()
             else:
                 status, notes = "pending", ""
             state["human_reviews"].append({"checkpoint": name, "status": status, "recorded_at": now_utc(), "notes": notes})
@@ -457,6 +462,14 @@ def prepare_project(
 
     sample_ids = _bootstrap_samples([unit["id"] for unit in units], resolved["terminology"]["bootstrap_samples"])
     atomic_write_json(project / "terminology" / "bootstrap-samples.json", {"schema_version": 1, "unit_ids": sample_ids})
+    # Samples miss terms that recur outside them; the whole book's recurring phrases and
+    # names go beside them for the glossary author.
+    from .quality import term_candidates
+
+    unit_texts = {unit["id"]: (project / "source-work" / "work-units" / f"{unit['id']}.md").read_text(encoding="utf-8")
+                  for unit in units}
+    atomic_write_json(project / "terminology" / "term-candidates.json", {
+        "schema_version": 1, **term_candidates(unit_texts, resolved["terminology"]["high_frequency_limit"])})
 
     unit_ids = {unit["id"] for unit in units}
     orphaned = _quarantine_orphans(project, unit_ids) if rebuild else []
