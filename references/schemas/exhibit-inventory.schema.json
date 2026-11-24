@@ -53,7 +53,8 @@
                 "text": {"type": "string", "minLength": 1},
                 "keep": {"type": "boolean"},
                 "lines": {"type": "integer", "minimum": 1},
-                "bbox": {"$ref": "#/$defs/rect"}
+                "bbox": {"$ref": "#/$defs/rect"},
+                "angle": {"type": "number", "description": "Reading direction in degrees when the label is not horizontal (-90 reads upward)"}
               },
               "additionalProperties": false
             }

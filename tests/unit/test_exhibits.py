@@ -79,6 +79,38 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(sorted(label["text"] for label in exhibit["labels"]),
                              ["Customer Needs", "Feedback", "Strategy Changes"])
 
+    def test_a_title_set_larger_than_the_body_is_a_label_but_body_text_is_not(self) -> None:
+        from book_translation_pro.exhibits import label_lines
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((100, 120), "Value Stream", fontname="hebo", fontsize=14)    # title in the figure
+        page.insert_text((100, 140), "Customer Needs", fontname="helv", fontsize=8)   # ordinary label
+        page.insert_text((100, 160), "the running text", fontname="tiro", fontsize=10)  # body size: prose
+        page.insert_text((100, 175), "a touch larger", fontname="tiro", fontsize=10.3)  # still body-like
+        texts = [line["text"] for line in label_lines(page, fitz.Rect(90, 100, 400, 190), fitz.Rect(0, 0, 0, 0), 10.0)]
+        self.assertEqual(texts, ["Value Stream", "Customer Needs"])
+
+    def test_each_list_item_is_one_label_with_its_wrapped_lines(self) -> None:
+        from book_translation_pro.exhibits import group_labels
+
+        def line(text: str, x: float, y: float) -> dict:
+            return {"text": text, "bbox": fitz.Rect(x, y, x + 120, y + 8), "size": 7.5, "font": "Optima",
+                    "color": 0, "dir": (1, 0)}
+
+        lines = [line("• Use measures that can be understood", 100, 100), line("by all employees.", 105, 109),
+                 line("• Use measures that show employees", 100, 118), line("how their efforts drive", 105, 127),
+                 line("overall success.", 105, 136),
+                 line("• Provide information when needed", 100, 145),          # aligned bullet: a new item
+                 line("FR4—Achieve FR1 through FR3 in spite of", 100, 170), line("variation.", 124, 179),
+                 line("FR5—Identify a problem condition", 100, 188),
+                 line("Value Stream", 100, 210), line("Costs", 100, 219)]      # an ordinary two-line label
+        texts = [g["text"] for g in group_labels(lines, [])]
+        self.assertEqual(texts, ["• Use measures that can be understood by all employees.",
+                                 "• Use measures that show employees how their efforts drive overall success.",
+                                 "• Provide information when needed",
+                                 "FR4—Achieve FR1 through FR3 in spite of variation.",
+                                 "FR5—Identify a problem condition", "Value Stream Costs"])
+
     def test_a_line_or_an_open_path_is_not_a_box(self) -> None:
         document = fitz.open()
         page = document.new_page()
@@ -197,6 +229,109 @@ class RenderTests(unittest.TestCase):
             figure_render.render_diagram(self.pdf, stale, self.translations, self.root / "out.png")
 
 
+def _rotated_chart_pdf(path: Path) -> None:
+    """A bar chart: a y-axis title reading upward, bar names slanted at 45° hanging from the
+    x-axis (one of them a code), horizontal tick labels, and a horizontal title."""
+    document = fitz.open()
+    page = document.new_page()
+    _body(page, 60)
+    page.draw_line((100, 150), (100, 300), color=(0, 0, 0), width=0.8)
+    page.draw_line((100, 300), (400, 300), color=(0, 0, 0), width=0.8)
+    for x, top in ((140, 200), (220, 230), (300, 260)):
+        page.draw_rect(fitz.Rect(x, top, x + 30, 300), color=(0, 0, 0), fill=(0.6, 0.6, 0.6), width=0.5)
+    page.insert_text((80, 304), "0%", fontname="helv", fontsize=8)
+    page.insert_text((76, 154), "50%", fontname="helv", fontsize=8)
+    page.insert_text((180, 145), "Share of firms", fontname="helv", fontsize=9)
+    # Reading upward, centred on the axis (morph turns in the PDF's upward y: +90 reads up).
+    origin = fitz.Point(70, 245)
+    page.insert_text(origin, "Percent", fontname="helv", fontsize=8, morph=(origin, fitz.Matrix(90)))
+    for name, x in (("Port security", 155), ("ATON", 235), ("Search and rescue", 315)):
+        length = fitz.get_text_length(name, fontname="helv", fontsize=8)
+        end = fitz.Point(x, 308)  # just under the axis
+        start = fitz.Point(end.x - length * 0.7071, end.y + length * 0.7071)
+        page.insert_text(start, name, fontname="helv", fontsize=8, morph=(start, fitz.Matrix(45)))
+    page.insert_text((72, 380), "EXHIBIT 3.1 Rotated Labels", fontname="hebo", fontsize=9)
+    _body(page, 420)
+    document.save(path)
+    document.close()
+
+
+class RotatedLabelTests(unittest.TestCase):
+    NAMES = {"Share of firms": "企业占比", "Percent": "百分比", "Port security": "港口安全",
+             "Search and rescue": "搜索与救援"}
+
+    def setUp(self) -> None:
+        try:
+            figure_render.font_files()
+        except BTPError:
+            self.skipTest("no CJK font installed")
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.pdf = self.root / "book.pdf"
+        _rotated_chart_pdf(self.pdf)
+        inventory = build_inventory(self.pdf)
+        validate_schema(inventory, "exhibit-inventory.schema.json")
+        (self.exhibit,) = inventory["exhibits"]
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def test_rotated_labels_make_a_diagram_with_their_angles(self) -> None:
+        self.assertEqual(self.exhibit["classification"], "diagram")
+        angles = {label["text"]: label.get("angle", 0) for label in self.exhibit["labels"]}
+        self.assertEqual(angles["Percent"], -90)
+        self.assertEqual(angles["Port security"], -45)
+        self.assertEqual(angles["ATON"], -45)          # a slanted label of its own, not joined to a neighbour
+        self.assertEqual(angles["Share of firms"], 0)
+
+    def test_rotated_labels_are_redrawn_at_their_angle_and_kept_codes_survive(self) -> None:
+        translations = [self.NAMES.get(label["text"], label["text"]) for label in self.exhibit["labels"]]
+        captured: dict[str, list] = {}
+        original = fitz.Page.get_pixmap
+
+        def capture(page, *args, **kwargs):
+            captured["lines"] = [(tuple(round(v, 2) for v in line["dir"]), "".join(c["c"] for s in line["spans"] for c in s["chars"]))
+                                 for block in page.get_text("rawdict")["blocks"] for line in block.get("lines", [])]
+            return original(page, *args, **kwargs)
+
+        with mock.patch.object(fitz.Page, "get_pixmap", autospec=True, side_effect=capture):
+            report = figure_render.render_diagram(self.pdf, self.exhibit, translations, self.root / "out.png")
+        self.assertTrue(report["passed"], report["problems"])
+        rows = {row["source"]: row for row in report["rows"]}
+        self.assertEqual(rows["Percent"]["anchor"], "center")
+        self.assertEqual(rows["Port security"]["anchor"], "end")  # hangs from the axis
+        drawn = dict((text, direction) for direction, text in captured["lines"])
+        # The vertical title goes into Chinese stacked upright, read top to bottom.
+        stacked = [(direction, text) for direction, text in captured["lines"] if text in "百分比"]
+        self.assertEqual([text for _d, text in stacked], ["百", "分", "比"])
+        self.assertTrue(all(direction == (1.0, 0.0) for direction, _t in stacked))
+        self.assertEqual(rows["Percent"]["lines"], 1)
+        # A slanted bar name keeps its slant.
+        self.assertEqual(drawn.get("港口安全"), (0.71, -0.71))
+        self.assertIn("ATON", drawn)                     # the neighbouring code is not erased
+        self.assertFalse({"Percent", "Port security", "Search and rescue"} & set(drawn))
+
+    def test_two_upward_lines_of_one_title_group_but_a_distant_one_does_not(self) -> None:
+        from book_translation_pro.exhibits import group_labels, label_lines
+        document = fitz.open()
+        page = document.new_page()
+        # Set at 10.5 pt leading for 8.5 pt type, as a book sets two lines of one title.
+        for text, x, middle in (("Planning and Tactical", 60, 200), ("Processes", 70.5, 200), ("Support", 140, 200)):
+            length = fitz.get_text_length(text, fontname="helv", fontsize=8.5)
+            origin = fitz.Point(x, middle + length / 2)
+            page.insert_text(origin, text, fontname="helv", fontsize=8.5, morph=(origin, fitz.Matrix(90)))
+        lines = label_lines(page, fitz.Rect(40, 100, 300, 300), fitz.Rect(0, 0, 0, 0), 11.0)
+        self.assertEqual([g["text"] for g in group_labels(lines, [])], ["Planning and Tactical Processes", "Support"])
+
+    def test_a_rotated_translation_longer_than_its_label_shrinks_or_fails_loudly(self) -> None:
+        long = "这是一个远远长于原标签的译文，无法放进原来的位置"
+        translations = [long if label["text"] == "Percent" else self.NAMES.get(label["text"], label["text"])
+                        for label in self.exhibit["labels"]]
+        report = figure_render.render_diagram(self.pdf, self.exhibit, translations, self.root / "out.png")
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("does_not_fit" in problem for problem in report["problems"]), report["problems"])
+
+
 def _row_box_pdf(path: Path) -> None:
     """Two stacked labels side by side in one box, an underlined label, a slanted arrow."""
     document = fitz.open()
@@ -283,6 +418,56 @@ class RendererRuleTests(unittest.TestCase):
         stem = (P(90, 230), P(90, 250), 5)          # vertical
         shaft_end = (P(94, 241.5), P(96.2, 241.5), 6)  # the top of an arrow shaft starting under the words
         found = figure_render.underlines_of(group, [underline, box_edge, stem, shaft_end])
+        self.assertEqual([(round(r.x0), round(r.x1)) for r in found], [(70, 119)])
+
+    def test_items_one_per_source_line_keep_their_rows(self) -> None:
+        try:
+            font = fitz.Font(fontfile=figure_render.font_files()[0])
+        except BTPError:
+            self.skipTest("no CJK font installed")
+
+        def group(rows: list[tuple[float, float, str]]) -> dict:
+            lines = [{"bbox": fitz.Rect(x0, y, x1, y + 3.8), "size": 3.8, "text": text} for x0, x1, y, text in
+                     [(x0, x1, 100 + 5.08 * i, text) for i, (x0, x1, text) in enumerate(rows)]]
+            return {"lines": lines, "size": 3.8, "bbox": lines[0]["bbox"]}
+
+        points = figure_render.PointGrid([])
+        # A table column at 5.08 pt pitch: each item on its own source row, left edges snapped.
+        steps = group([(60, 90, "Receive request"), (60.8, 95, "Maintain open req file"), (60, 99, "Review account no")])
+        plan = figure_render.plan_rows(steps, "接收请求||维护未结请购文件||审核账号", font, 60, fitz.TEXT_ALIGN_CENTER, points)
+        self.assertEqual(plan["status"], "ok")
+        tops = [round(row.y0 + figure_render.INK_MARGIN * plan["size"], 2) for row in plan["rows"]]
+        self.assertEqual([round(b - a, 2) for a, b in zip(tops, tops[1:])], [5.08, 5.08])
+        self.assertEqual({round(row.x0, 2) for row in plan["rows"]}, {60.0})   # left, snapped, though "centre" was asked
+        # A column of figures, centred in the source, stays centred.
+        figures = group([(100, 140, "$900,000"), (104, 136, "23 minutes"), (115, 125, "2X")])
+        plan = figure_render.plan_rows(figures, "$900,000||23 分钟||2X", font, 60, fitz.TEXT_ALIGN_LEFT, points)
+        centres = {round((row.x0 + row.x1) / 2, 1) for row in plan["rows"]}
+        self.assertEqual(centres, {120.0})
+        # Item count differing from the line count: not row-locked.
+        self.assertIsNone(figure_render.plan_rows(steps, "接收请求||维护未结请购文件", font, 60, fitz.TEXT_ALIGN_LEFT, points))
+
+    def test_tightly_set_list_items_do_not_clash_but_overlapping_text_does(self) -> None:
+        font = None
+        try:
+            font = fitz.Font(fontfile=figure_render.font_files()[0])
+        except BTPError:
+            self.skipTest("no CJK font installed")
+        rect, size = fitz.Rect(100, 100, 300, 140), 7.5
+        first = figure_render.ink_boxes(["希望为实现目标作出贡献"], rect, 100.0, size, 0, font)[0]
+        tight = figure_render.ink_boxes(["被赋予决策权"], rect, 108.0, size, 0, font)[0]      # 8 pt pitch
+        into = figure_render.ink_boxes(["接受交叉培训"], rect, 105.0, size, 0, font)[0]      # 5 pt pitch
+        self.assertEqual(figure_render.clashes([(1, first, size), (2, tight, size)]), [])
+        self.assertEqual(figure_render.clashes([(1, first, size), (3, into, size)]), [(1, 3)])
+
+    def test_the_top_of_a_box_narrower_than_its_title_is_not_an_underline(self) -> None:
+        line = {"bbox": fitz.Rect(70, 233, 120, 242), "size": 8}
+        P = fitz.Point
+        top, left, right = (P(74, 241.5), P(110, 241.5), 3), (P(74, 241.5), P(74, 300), 3), (P(110, 241.5), P(110, 300), 3)
+        self.assertEqual(figure_render.underlines_of({"lines": [line]}, [top, left, right]), [])
+        # An underline that an arrow merely touches at one end is still an underline.
+        underline, arrow = (P(70, 241.5), P(119, 241.5), 4), (P(119, 241.5), P(119, 280), 5)
+        found = figure_render.underlines_of({"lines": [line]}, [underline, arrow])
         self.assertEqual([(round(r.x0), round(r.x1)) for r in found], [(70, 119)])
 
     def test_an_underline_is_painted_out_in_the_colour_under_it(self) -> None:
@@ -776,6 +961,25 @@ class ExhibitQATests(unittest.TestCase):
     def test_changed_code_and_untranslated_label_fail(self) -> None:
         fails = self._fails(LABELS_SOURCE, _labels_target("Customer Needs", "FR一", "反馈"))
         self.assertEqual(len([f for f in fails if f.startswith("exhibit.labels")]), 2, fails)
+
+    def test_indexed_symbol_runs_are_codes_but_words_are_not(self) -> None:
+        from book_translation_pro.exhibits import keeps_source_form
+        self.assertTrue(all(map(keeps_source_form, ["R8...... Rn", "V1 … Vn", "$V1", "WIP", "FR2", "–"])))
+        self.assertFalse(any(map(keeps_source_form, ["Rn Is Here", "Go To", "Customer Needs", "Value"])))
+
+    def test_a_short_capitalised_label_translated_as_a_word_needs_a_declaration(self) -> None:
+        source = LABELS_SOURCE.replace("3. Feedback", "3. MAN")
+        target = _labels_target("客户|需求", "FR1", "人员")
+        self.assertTrue(any("code 'MAN' must be copied unchanged" in f for f in self._fails(source, target)))
+        declared = ["label_is_word: 1.1#3 (the cause category man, not an abbreviation)"]
+        checks: list[dict] = []
+        _exhibit_unit_checks(checks, "unit-0001", source, target, {"source_issues": declared})
+        self.assertEqual([(c["status"], c["message"]) for c in checks if c["id"] == "exhibit.labels"],
+                         [("warn", "Exhibit 1.1 label 3: 'MAN' declared a word, translated as '人员': "
+                                   "the cause category man, not an abbreviation")])
+        # A declaration for another label, or with no reason, excuses nothing.
+        for issues in (["label_is_word: 1.1#2 (x)"], ["label_is_word: 1.1#3 ()"]):
+            self.assertTrue(self._fails(source, target, issues), issues)
 
     def test_figure_audit_sees_the_image_across_a_long_label_block(self) -> None:
         from book_translation_pro.figures import _caption_images

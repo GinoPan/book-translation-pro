@@ -8,9 +8,11 @@ from textwrap import dedent
 from pathlib import Path
 from typing import Any
 
-from .artifacts import atomic_write_json, atomic_write_text, safe_project_path, validate_schema
+from .artifacts import BTPError, atomic_write_json, atomic_write_text, safe_project_path, validate_schema
 from .manifest import load_manifest
 from .structure import parse_blocks
+
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
 
 def _text_hash(text: str) -> str:
@@ -27,6 +29,7 @@ def create_segment_alignment(project: Path, config: dict[str, Any]) -> dict[str,
     manifest = load_manifest(project)
     require_edit = bool(config["passes"]["edit"])
     items: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
     for order, entry in enumerate(sorted(manifest["units"], key=lambda item: item["order"])):
         source_path = safe_project_path(project, entry["source_file"])
         target_path = safe_project_path(
@@ -34,6 +37,14 @@ def create_segment_alignment(project: Path, config: dict[str, Any]) -> dict[str,
         )
         source_text = source_path.read_text(encoding="utf-8").strip()
         target_text = target_path.read_text(encoding="utf-8").strip()
+        if not source_text:
+            # A unit emptied when its exhibit fragments were rebuilt in another unit has
+            # nothing to pair; its translation may only say so in a comment.
+            if _HTML_COMMENT_RE.sub("", target_text).strip():
+                raise BTPError(f"{entry['unit_id']}: the source unit is empty but its translation is not; "
+                               "move the translation to the unit that now holds its source")
+            skipped.append({"unit_id": entry["unit_id"], "reason": "empty source unit; translation holds only a comment"})
+            continue
         items.append({
             "id": f"align-{order + 1:04d}",
             "order": order,
@@ -50,6 +61,7 @@ def create_segment_alignment(project: Path, config: dict[str, Any]) -> dict[str,
         "source_fingerprint": manifest["source_fingerprint"],
         "target_language": config["target"]["language"],
         "items": items,
+        **({"skipped_units": skipped} if skipped else {}),
     }
     validate_schema(value, "segment-alignment.schema.json")
     path = project / "target" / "alignment.json"
@@ -187,10 +199,21 @@ def _drop_wrapper_tags(fragment: str, side: str, seen: set[str]) -> str:
     return fragment
 
 
+# Word joins two tables that touch into one, so a source table and its translation (or a
+# translation and the next source table) need a paragraph between them: a no-break space.
+TABLE_GAP = " "
+
+
+def _edge_line(block: str, first: bool) -> str:
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    return (lines[0] if first else lines[-1]) if lines else ""
+
+
 def render_bilingual_markdown(alignment: dict[str, Any], destination: Path | None = None) -> str:
     validate_schema(alignment, "segment-alignment.schema.json")
     blocks: list[str] = []
     seen_ids: dict[str, set[str]] = {"src": set(), "tgt": set()}
+    previous_ends_in_table = False
     for item in sorted(alignment["items"], key=lambda row: row["order"]):
         source_fragment = _drop_wrapper_tags(item["source_text"], "src", seen_ids["src"])
         target_fragment = _drop_wrapper_tags(item["target_text"], "tgt", seen_ids["tgt"])
@@ -216,18 +239,18 @@ def render_bilingual_markdown(alignment: dict[str, Any], destination: Path | Non
             r"\[\^([^]]+)\]", lambda match: f"[^{item['id']}-target-{match.group(1)}]", target_fragment
         )
         for number, (source_block, target_block) in enumerate(_paired_blocks(source_text, target_text), 1):
-            blocks.extend([
-                f"::: {{.btp-source data-alignment-id=\"{item['id']}\" data-block=\"{number}\"}}",
-                source_block,
-                "",
-                ":::",
-                "",
-                f"::: {{.btp-target data-alignment-id=\"{item['id']}\" data-block=\"{number}\"}}",
-                "",
-                target_block,
-                "",
-                ":::",
-            ])
+            for side, block in (("source", source_block), ("target", target_block)):
+                if _edge_line(block, first=True).startswith("|") and previous_ends_in_table:
+                    blocks.extend(["", TABLE_GAP, ""])
+                previous_ends_in_table = _edge_line(block, first=False).startswith("|")
+                blocks.extend([
+                    f"::: {{.btp-{side} data-alignment-id=\"{item['id']}\" data-block=\"{number}\"}}",
+                    *([""] if side == "target" else []),
+                    block,
+                    "",
+                    ":::",
+                    *([""] if side == "source" else []),
+                ])
     text = "\n".join(blocks).strip() + "\n"
     if destination is not None:
         atomic_write_text(destination, text)

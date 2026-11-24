@@ -15,6 +15,7 @@ replace the extracted text; anything else is ``uncertain``.
 
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter
 from pathlib import Path
@@ -34,6 +35,10 @@ MIN_TABLE_ROWS = 2
 WRAP_GAP = 0.5            # a gap below this many font sizes continues the same cell or label
 LABEL_WRAP_GAP = 0.45
 LABEL_MAX_SIZE_RATIO = 1.0
+LABEL_TITLE_SIZE_RATIO = 1.05  # text this much larger than the body is a title set in the figure
+# A list item in a figure: a bullet, a code with a dash ("FR1—Produce …"), or a number ("1. Understand …").
+LIST_MARKER_RE = re.compile(r"^(?:[•▪●◦]\s*|[A-Z]{1,4}\d+\s*[—–]\s*\S|\d{1,2}\.\s+\S)")
+LIST_HANG_MAX = 4.0            # a wrapped item line is indented under its text by at most this many font sizes
 
 
 def _fitz() -> Any:
@@ -452,14 +457,35 @@ def label_lines(page: Any, crop: Any, caption: Any, body_size: float) -> list[di
             if not crop.contains(box) or box.intersects(caption):
                 continue
             size = round(spans[0]["size"], 1)
-            if body_size and size >= body_size * LABEL_MAX_SIZE_RATIO and _direction(line) == (1, 0):
+            # Body-size text in the crop is prose beside the figure; a larger one is a title in it.
+            if (body_size and body_size * LABEL_MAX_SIZE_RATIO <= size < body_size * LABEL_TITLE_SIZE_RATIO
+                    and _direction(line) == (1, 0)):
                 continue
             out.append({
                 "text": "".join(c["c"] for s in line["spans"] for c in s["chars"]).strip(),
                 "bbox": box, "size": size, "font": spans[0]["font"], "color": spans[0]["color"],
                 "dir": _direction(line),
+                # The reading direction in degrees (0 horizontal, -90 reading upward, -45 slanting up)
+                # and each glyph's box: a rotated label is measured, erased and redrawn by them.
+                "angle": round(math.degrees(math.atan2(line["dir"][1], line["dir"][0])), 1),
+                "char_boxes": [fitz.Rect(c["bbox"]) for c in glyphs],
+                "char_quads": [fitz.recover_char_quad(line["dir"], s, c)
+                               for s in line["spans"] for c in s["chars"] if c["c"].strip()],
             })
     return out
+
+
+def reading_box(line: dict[str, Any]) -> Any:
+    """A label line's box in its own reading frame (turned so its text runs left to right),
+    which is where a rotated label is grouped and placed; a horizontal line's own box."""
+    if line["dir"] == (1, 0):
+        return line["bbox"]
+    fitz = _fitz()
+    turn = fitz.Matrix(-line["angle"])
+    # The glyphs' own (rotated) quads: their upright boxes would overshoot a slanted line's ends.
+    corners = [corner * turn for quad in line["char_quads"] for corner in (quad.ul, quad.ur, quad.ll, quad.lr)]
+    return fitz.Rect(min(p.x for p in corners), min(p.y for p in corners),
+                     max(p.x for p in corners), max(p.y for p in corners))
 
 
 def boxes_in(page: Any, crop: Any) -> list[Any]:
@@ -493,20 +519,42 @@ def boxes_in(page: Any, crop: Any) -> list[Any]:
 def group_labels(lines: list[dict[str, Any]], boxes: list[Any]) -> list[dict[str, Any]]:
     """Merge label lines into phrases: same style, same box, closely stacked, sharing a
     left edge or a centre.  A neighbouring label set just below (a fishbone branch, a
-    metric line in the same box) does not share them."""
+    metric line in the same box) does not share them.  A list item ("• …", "FR1—…")
+    starts its own label, and its wrapped lines, indented under the item's text, join it.
+    A rotated line is measured in its own reading frame, and joins only lines of its angle;
+    rotated labels follow the horizontal ones."""
     groups: list[dict[str, Any]] = []
-    for line in sorted(lines, key=lambda l: (l["bbox"].y0, l["bbox"].x0)):
+    for line in lines:
+        line["rbox"] = reading_box(line)
+
+    def order(line: dict[str, Any]) -> tuple[Any, ...]:
+        if line["dir"] == (1, 0):
+            return (0, 0.0, line["bbox"].y0, line["bbox"].x0)
+        return (1, line.get("angle", 0.0), line["rbox"].y0, line["rbox"].x0)
+
+    for line in sorted(lines, key=order):
         probe = line["bbox"] + (1, 1, -1, -1)
         line["box"] = next((i for i, box in enumerate(boxes) if box.contains(probe)), None)
         target = None
+        # A slanted line (an axis label set at 45°) is a label of its own: parallel neighbours
+        # look stacked in the reading frame without belonging together.
+        if LIST_MARKER_RE.match(line["text"]) or line.get("angle", 0.0) % 90:
+            groups.append({"lines": [line]})
+            continue
+        here = line["rbox"]
         for group in groups:
-            last = group["lines"][-1]
-            gap = line["bbox"].y0 - last["bbox"].y1
-            same_left = abs(line["bbox"].x0 - last["bbox"].x0) < 1.5
-            same_center = abs((line["bbox"].x0 + line["bbox"].x1) - (last["bbox"].x0 + last["bbox"].x1)) / 2 < 2.5
+            last, first = group["lines"][-1], group["lines"][0]
+            there = last["rbox"]
+            gap = here.y0 - there.y1
+            same_left = abs(here.x0 - there.x0) < 1.5
+            same_center = abs((here.x0 + here.x1) - (there.x0 + there.x1)) / 2 < 2.5
+            indent = here.x0 - first["rbox"].x0
+            hanging = (len(group["lines"]) == 1 and bool(LIST_MARKER_RE.match(first["text"]))
+                       and 1.5 <= indent <= LIST_HANG_MAX * line["size"])
             if (last["font"] == line["font"] and abs(last["size"] - line["size"]) < 0.2 and last["color"] == line["color"]
                     and last["box"] == line["box"] and last["dir"] == line["dir"]
-                    and -1.5 <= gap < LABEL_WRAP_GAP * line["size"] and (same_left or same_center)):
+                    and last.get("angle", 0.0) == line.get("angle", 0.0)
+                    and -1.5 <= gap < LABEL_WRAP_GAP * line["size"] and (same_left or same_center or hanging)):
                 target = group
         if target:
             target["lines"].append(line)
@@ -515,16 +563,24 @@ def group_labels(lines: list[dict[str, Any]], boxes: list[Any]) -> list[dict[str
     for group in groups:
         group["text"] = " ".join(l["text"] for l in group["lines"])
         group["bbox"] = group["lines"][0]["bbox"]
+        group["rbox"] = group["lines"][0]["rbox"]
         for l in group["lines"][1:]:
             group["bbox"] = group["bbox"] | l["bbox"]
+            group["rbox"] = group["rbox"] | l["rbox"]
         first = group["lines"][0]
-        group.update(box=first["box"], size=first["size"], font=first["font"], color=first["color"], dir=first["dir"])
+        group.update(box=first["box"], size=first["size"], font=first["font"], color=first["color"], dir=first["dir"],
+                     angle=first.get("angle", 0.0))
     return groups
+
+
+# Indexed symbols in a run: "R8 . . . Rn", "V1 … Vn" (a subscript letter is not a word).
+SYMBOL_RUN_RE = re.compile(r"[A-Z][a-z]?\d*(?:[\s.…⋮]+[A-Z][a-z]?\d*)+")
 
 
 def keeps_source_form(text: str) -> bool:
     """Labels that read the same in any language: numbers, codes, symbols."""
-    return not re.search(r"[A-Za-z]{2,}", text) or bool(re.fullmatch(r"[A-Z]{1,4}\d*", text))
+    return (not re.search(r"[A-Za-z]{2,}", text) or bool(re.fullmatch(r"[A-Z]{1,4}\d*", text))
+            or bool(SYMBOL_RUN_RE.fullmatch(text) and re.search(r"\d", text)))
 
 
 def _slanted_art(page: Any, region: Any) -> bool:
@@ -629,14 +685,12 @@ def classify(page: Any, caption: dict[str, Any], body: tuple[str, float], avoid:
             return {"classification": "raster", "crop": [round(v, 2) for v in crop],
                     "reason": "embedded picture without a text layer; kept as is"}
         return {"classification": "uncertain", "crop": [round(v, 2) for v in crop], "reason": reason + "; no labels"}
-    if any(line["dir"] != (1, 0) for line in labels):
-        return {"classification": "uncertain", "crop": [round(v, 2) for v in crop],
-                "reason": "rotated labels are not replaced in place yet"}
     groups = group_labels(labels, boxes_in(page, crop))
     return {
         "classification": "diagram", "crop": [round(v, 2) for v in crop], "orientation": crop_info[1],
         "labels": [{"text": g["text"], "keep": keeps_source_form(g["text"]), "lines": len(g["lines"]),
-                    "bbox": [round(v, 2) for v in g["bbox"]]} for g in groups],
+                    "bbox": [round(v, 2) for v in g["bbox"]], **({"angle": g["angle"]} if g["angle"] else {})}
+                   for g in groups],
         "reason": f"{len(groups)} label(s) on vector line art",
     }
 

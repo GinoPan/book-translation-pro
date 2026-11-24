@@ -77,6 +77,108 @@ class V1ContractTests(unittest.TestCase):
             self.assertIn("轴承预紧为 10 mm", rendered)
             self.assertIn('data-alignment-id="align-0001"', rendered)
 
+    def test_a_source_table_and_its_translation_are_kept_apart_for_word(self) -> None:
+        from book_translation_pro.alignment import TABLE_GAP
+
+        def item(order: int, source: str, target: str) -> dict:
+            return {"id": f"align-{order + 1:04d}", "order": order, "unit_id": f"unit-{order + 1:04d}",
+                    "book_node_id": None, "source_segment_ids": ["seg-000001"], "source_text": source,
+                    "target_text": target, "source_sha256": "a" * 64, "target_sha256": "b" * 64}
+
+        alignment = {"schema_version": 1, "source_fingerprint": "c" * 64, "target_language": "zh-CN", "items": [
+            item(0, "| Cost | 1 |\n|---|---|\n| Labor | 2 |", "| 成本 | 1 |\n|---|---|\n| 人工 | 2 |"),
+            item(1, "Prose after the table.", "表格之后的文字。"),
+        ]}
+        rendered = render_bilingual_markdown(alignment)
+        between = rendered[rendered.index("| Labor | 2 |"):rendered.index("| 成本 | 1 |")]
+        self.assertIn(f"\n{TABLE_GAP}\n", between)            # Word would otherwise join the two tables
+        self.assertEqual(rendered.count(TABLE_GAP), 1)        # and nowhere else
+
+    def test_bilingual_sides_lose_print_residue_and_slivers_but_keep_text_and_pictures(self) -> None:
+        from PIL import Image
+
+        from book_translation_pro.publication import clean_bilingual_side
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images = root / "assets" / "original" / "images"
+            images.mkdir(parents=True)
+            Image.new("RGB", (12, 40)).save(images / "000001.png")    # a sliver of a drawing
+            Image.new("RGB", (300, 200)).save(images / "000002.jpg")  # a picture
+            text = "\n".join([
+                'Lean companies make money by flow. <span class="calibre3">ch07_4772.qxd 2/2/07 3:41 PM Page 160</span>',
+                "",
+                "**160** **Lean Accounting**",
+                "",
+                '<img src="assets\\original/images/000001.png" class="calibre52" />',
+                "",
+                '<img src="assets\\original/images/000002.jpg" class="calibre49" />',
+                "",
+                "**Exhibit 6.10** USCG Budget",
+                "",
+                "160 units were sold.",
+            ])
+            cleaned = clean_bilingual_side(root, text)
+            self.assertEqual([line for line in cleaned.splitlines() if line.strip()], [
+                "Lean companies make money by flow. ", "![](assets/original/images/000002.jpg)",
+                "**Exhibit 6.10** USCG Budget", "160 units were sold.",   # a sentence opening with the page number stays
+            ])
+            # Without a print stamp there is no page to recognise a running head by.
+            self.assertIn("**160** **Lean Accounting**", clean_bilingual_side(root, "**160** **Lean Accounting**"))
+
+    def test_bilingual_items_leave_out_comment_only_units_and_stand_in_for_emptied_sources(self) -> None:
+        from PIL import Image
+
+        from book_translation_pro.publication import bilingual_items
+
+        class Same:
+            def source(self, text: str) -> str:
+                return text
+
+            def target(self, text: str) -> str:
+                return text
+
+        def item(order: int, source: str, target: str) -> dict:
+            return {"id": f"align-{order + 1:04d}", "order": order, "unit_id": f"unit-{order + 1:04d}",
+                    "book_node_id": None, "source_segment_ids": ["seg-000001"], "source_text": source,
+                    "target_text": target, "source_sha256": "a" * 64, "target_sha256": "b" * 64}
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images = root / "assets" / "original" / "images"
+            images.mkdir(parents=True)
+            Image.new("RGB", (10, 10)).save(images / "000001.png")
+            Image.new("RGB", (400, 300)).save(images / "exhibit-10-4.png")
+            sliver = '<img src="assets/original/images/000001.png" class="calibre52" />'
+            items = [item(0, "Text before.", "前文。"),
+                     item(1, sliver, "### 图表10.4　将萨班斯风险与精益结合\n\n| 编号 |\n|---|\n| 1 |"),
+                     item(2, sliver, "### 图表10.4续　将萨班斯风险与精益结合\n\n| 编号 |\n|---|\n| 2 |"),
+                     item(3, sliver + "\n\n1O 2P", "<!-- 图表10.4的视觉切片；内容已在前文重建。 -->"),
+                     item(4, "Text after.", "后文。"),
+                     item(5, "# OCR Recovered Source Pages", "# OCR 恢复的源页面"),
+                     item(6, "## Source Page 1", "## 源页面 1")]
+            kept, skipped = bilingual_items(root, items, Same())
+            self.assertEqual([i["unit_id"] for i in kept], ["unit-0001", "unit-0002", "unit-0003", "unit-0005"])
+            self.assertEqual(kept[1]["source_text"], "![](assets/original/images/exhibit-10-4.png)")  # shown once
+            self.assertEqual(kept[2]["source_text"], " ")                                     # then blank
+            self.assertEqual(skipped, [{"unit_id": "unit-0004", "reason": "translation holds only a comment"}])
+
+    def test_an_emptied_source_unit_is_skipped_only_when_its_translation_is_a_comment(self) -> None:
+        from book_translation_pro.manifest import load_manifest
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _ = make_project(root)
+            entry = load_manifest(root)["units"][0]
+            atomic_write_text(root / entry["source_file"], "\n")
+            target = root / "target" / "edited" / "unit-0001.md"
+            atomic_write_text(target, "<!-- 本单元原文只剩图表碎片，已重建为下一单元中的表格。 -->\n")
+            alignment = create_segment_alignment(root, config)
+            self.assertEqual(alignment["items"], [])
+            self.assertEqual([s["unit_id"] for s in alignment["skipped_units"]], ["unit-0001"])
+            # A translation with real text under an empty source would vanish: fail loudly.
+            atomic_write_text(target, "<!-- 说明 -->\n\n轴承预紧为 10 mm。\n")
+            with self.assertRaisesRegex(BTPError, "source unit is empty but its translation is not"):
+                create_segment_alignment(root, config)
+
     def test_bilingual_pairs_blocks_when_both_sides_have_the_same_shape(self) -> None:
         def item(source: str, target: str) -> dict:
             return {
