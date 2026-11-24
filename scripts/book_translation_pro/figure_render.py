@@ -447,15 +447,250 @@ def ink_boxes(lines: list[str], rect: Any, top: float, size: float, align: int, 
     return boxes
 
 
+def _corners(shape: Any) -> list[Any]:
+    quad = shape if isinstance(shape, _fitz().Quad) else shape.quad
+    return [quad.ul, quad.ur, quad.lr, quad.ll]
+
+
+def _separated(a: list[Any], b: list[Any]) -> bool:
+    """Separating-axis test for two convex quadrilaterals given by their corners."""
+    for poly in (a, b):
+        for i in range(4):
+            p, q = poly[i], poly[(i + 1) % 4]
+            nx, ny = q.y - p.y, p.x - q.x
+            if not (nx or ny):
+                continue
+            pa = [nx * c.x + ny * c.y for c in a]
+            pb = [nx * c.x + ny * c.y for c in b]
+            if max(pa) < min(pb) or max(pb) < min(pa):
+                return True
+    return False
+
+
+def in_quad(point: Any, quad: Any) -> bool:
+    corners = _corners(quad)
+    signs = [(q.x - p.x) * (point.y - p.y) - (q.y - p.y) * (point.x - p.x)
+             for p, q in zip(corners, corners[1:] + corners[:1])]
+    return all(s >= 0 for s in signs) or all(s <= 0 for s in signs)
+
+
+def hits_quad(quad: Any, points: PointGrid) -> bool:
+    """Whether visible line art passes through a (possibly rotated) quadrilateral."""
+    return any(in_quad(point, quad) for cell in _cells(quad.rect) for point in points.cells.get(cell, ()))
+
+
 def clashes(drawn: list[tuple[int, Any, float]]) -> list[tuple[int, int]]:
     """Pairs of labels whose drawn lines overlap.  Each line is compared by its em box: the
     ink margin keeps text off a rule, but two tightly set list items whose margins touch
-    do not collide."""
+    do not collide.  A rotated line comes as a quad already trimmed to its em box."""
+    fitz = _fitz()
+
     def em(box: Any, size: float) -> Any:
+        if isinstance(box, fitz.Quad):
+            return box
         return box + (0.2, INK_MARGIN * size + 0.2, -0.2, -INK_MARGIN * size - 0.2)
 
+    def overlap(a: Any, b: Any) -> bool:
+        if isinstance(a, fitz.Rect) and isinstance(b, fitz.Rect):
+            return a.intersects(b)
+        return not _separated(_corners(a), _corners(b))
+
     return sorted({(a, b) for a, box, size in drawn for b, other, other_size in drawn
-                   if a < b and em(box, size).intersects(em(other, other_size))})
+                   if a < b and overlap(em(box, size), em(other, other_size))})
+
+
+# --- rotated labels --------------------------------------------------------------------
+# A label set at an angle (an axis title reading upward, slanted bar names) is placed in
+# its own reading frame: turned by -angle its text runs left to right, and the source
+# anchor is kept there.  Points map to the page by Matrix(angle); text is drawn with
+# morph Matrix(-angle), which PyMuPDF applies in the PDF's upward y.
+
+ROTATED_ANCHOR_REACH = 1.2  # line art this close (font sizes) to one end anchors the label there
+
+
+def rotated_anchor(group: dict[str, Any], points: PointGrid) -> str:
+    """Which end of a rotated label stays put: the one next to line art (the axis a bar
+    name hangs from, the cell edge a column head stands on), or its centre."""
+    fitz = _fitz()
+    box, back = group["rbox"], fitz.Matrix(group["angle"])
+    middle, reach = (box.y0 + box.y1) / 2, ROTATED_ANCHOR_REACH * group["size"]
+
+    def near(x: float) -> bool:
+        p = fitz.Point(x, middle) * back
+        return hits(fitz.Rect(p.x - reach, p.y - reach, p.x + reach, p.y + reach), points)
+
+    start, end = near(box.x0), near(box.x1)
+    return "end" if end and not start else "start" if start and not end else "center"
+
+
+_CJK_RE = re.compile(r"[　-鿿＀-￯]")
+UPRIGHT_LATIN_ADVANCE = 0.75  # a Latin letter or digit stacked upright takes this much of the font size
+
+
+class _Stacked:
+    """Measures a text set upright one character under another, so line breaking can
+    treat a column's height as a line's width."""
+
+    def __init__(self, font: Any) -> None:
+        self.font = font
+
+    @staticmethod
+    def advance(char: str, size: float) -> float:
+        return size if _CJK_RE.match(char) else UPRIGHT_LATIN_ADVANCE * size
+
+    def text_length(self, text: str, size: float) -> float:
+        return sum(self.advance(char, size) for char in text if char != " ")
+
+
+ROW_SNAP = 2.0  # points
+
+
+def plan_rows(group: dict[str, Any], translation: str, font: Any, width: float, align: int,
+              points: PointGrid) -> dict[str, Any] | None:
+    """A label whose items are forced one per line ("||"), one item per source line (a
+    table column inside a form, a legend): each item keeps its source line's row, so the
+    rows stay in line with the rules and the neighbouring columns.  None when the item
+    count differs from the line count; the label is then set as a block."""
+    fitz = _fitz()
+    items = [item.replace("|", "").strip() for item in translation.split("||")]
+    if len(items) < 2 or len(items) != len(group["lines"]):
+        return None
+    floor = round(group["size"] * MIN_SCALE, 2)
+    size = group["size"]
+    while size >= floor - 1e-6 and max(font.text_length(item, size) for item in items) > width:
+        size = round(size - 0.2, 2)
+    if size < floor - 1e-6:
+        return {"status": "does_not_fit", "size": floor}
+    # Left edges within ROW_SNAP of each other are one column edge (a dash or a bullet
+    # glyph moves the source's ink a little); they share the leftmost.
+    lefts = [line["bbox"].x0 for line in group["lines"]]
+    snapped = [min(other for other in lefts if abs(other - left) <= ROW_SNAP) for left in lefts]
+    # The rows themselves say how they are set: centred when their centres agree within a
+    # point and their left edges do not (a column of figures), else from the left.
+    centres = [(line["bbox"].x0 + line["bbox"].x1) / 2 for line in group["lines"]]
+    centred = max(centres) - min(centres) <= 1.0 and len(set(snapped)) > 1
+    align = fitz.TEXT_ALIGN_CENTER if centred else fitz.TEXT_ALIGN_LEFT
+    rows = []
+    for item, line, left in zip(items, group["lines"], snapped):
+        box, item_width = line["bbox"], font.text_length(item, size)
+        x0 = (box.x0 + box.x1 - item_width) / 2 if align == fitz.TEXT_ALIGN_CENTER else left
+        top = (box.y0 + box.y1 - size) / 2
+        rows.append(fitz.Rect(x0, top - INK_MARGIN * size, x0 + item_width, top + size + INK_MARGIN * size))
+    source_crosses = any(hits(l["bbox"] + (0.3, 0.25 * l["size"], -0.3, -0.25 * l["size"]), points) for l in group["lines"])
+    # A row of a ruled table sits close between its rules: test the glyphs' body (the em box
+    # less a tenth at top and bottom), not the margin kept for free-standing labels.
+    trim = (INK_MARGIN + 0.1) * size
+    collides = not source_crosses and any(hits(row + (0.3, trim, -0.3, -trim), points) for row in rows)
+    return {"status": "crosses_line_art" if collides else "ok", "size": size, "lines": items, "rows": rows}
+
+
+def plan_upright(group: dict[str, Any], translation: str, font: Any, points: PointGrid,
+                 others: list[Any]) -> dict[str, Any]:
+    """A vertical label translated into Chinese: its characters stand upright one under
+    another, read top to bottom, further columns to the left, in the source's place."""
+    fitz = _fitz()
+    anchor = rotated_anchor(group, points)
+    length, stacked = group["rbox"].width, _Stacked(font)
+    floor = round(group["size"] * MIN_SCALE, 2)
+    size, columns = group["size"], None
+    while size >= floor - 1e-6:
+        fitting = [option for option in arrangements(translation, length + 0.01, stacked, size)
+                   if len(option) <= len(group["lines"])]
+        if fitting:
+            columns = fitting[0]
+            break
+        size = round(size - 0.2, 2)
+    if columns is None:
+        return {"status": "does_not_fit", "size": floor}
+    bbox = group["bbox"]
+    # The end of the source line that stays put: reading upward (-90) its start is the bottom.
+    top_kept = (anchor == "end") == (group["angle"] < 0)
+    pitch = size * LINE_HEIGHT
+    right = (bbox.x0 + bbox.x1) / 2 + (len(columns) * pitch - (pitch - size)) / 2
+    rects = []
+    for index, column in enumerate(columns):
+        height = stacked.text_length(column, size)
+        if anchor == "center":
+            y0 = (bbox.y0 + bbox.y1 - height) / 2
+        else:
+            y0 = bbox.y0 if top_kept else bbox.y1 - height
+        x1 = right - index * pitch
+        rects.append(fitz.Rect(x1 - size, y0, x1, y0 + height))
+    inset = 0.25 * group["size"]
+    source_crosses = any(hits(b + (inset, inset, -inset, -inset), points)
+                         for line in group["lines"] for b in line["char_boxes"])
+    collides = not source_crosses and any(hits(rect, points) for rect in rects)
+    overlaps = any(not _separated(_corners(rect + (0.2, 0.2, -0.2, -0.2)), _corners(other))
+                   for rect in rects for other in others)
+    status = "overlaps_label" if overlaps else "crosses_line_art" if collides else "ok"
+    return {"status": status, "size": size, "lines": columns, "columns": rects, "anchor": anchor,
+            "upright": True, "em_quads": [(rect + (0.2, 0.2, -0.2, -0.2)).quad for rect in rects],
+            "quads": [rect.quad for rect in rects]}
+
+
+def set_upright(page: Any, plan: dict[str, Any], name: str, color: tuple[float, float, float], fonts: Fonts) -> None:
+    fitz = _fitz()
+    size, font = plan["size"], fonts.objects[name]
+    for column, rect in zip(plan["lines"], plan["columns"]):
+        y = rect.y0
+        for char in column:
+            if char == " ":
+                continue
+            advance = _Stacked.advance(char, size)
+            x = (rect.x0 + rect.x1 - font.text_length(char, size)) / 2
+            # Centre the glyph in its cell: a Latin cell is shorter than the em box.
+            page.insert_text(fitz.Point(x, y + (advance - size) / 2 + fonts.baseline(name) * size), char,
+                             fontname=name, fontsize=size, color=color)
+            y += advance
+
+
+def plan_rotated(group: dict[str, Any], translation: str, font: Any, points: PointGrid,
+                 others: list[Any]) -> dict[str, Any]:
+    """Place a rotated label in its reading frame: no longer than the source, on no more
+    lines, shrinking down to MIN_SCALE; the local em boxes of its lines come back.  A
+    vertical label going into Chinese is stacked upright instead (plan_upright)."""
+    fitz = _fitz()
+    if abs(group["angle"]) == 90 and _CJK_RE.search(translation):
+        return plan_upright(group, translation, font, points, others)
+    box, back = group["rbox"], fitz.Matrix(group["angle"])
+    anchor = rotated_anchor(group, points)
+    floor = round(group["size"] * MIN_SCALE, 2)
+    size, lines = group["size"], None
+    while size >= floor - 1e-6:
+        fitting = [option for option in arrangements(translation, box.width + 0.01, font, size)
+                   if len(option) <= len(group["lines"])]
+        if fitting:
+            lines = fitting[0]
+            break
+        size = round(size - 0.2, 2)
+    if lines is None:
+        return {"status": "does_not_fit", "size": floor}
+    top = (box.y0 + box.y1) / 2 - ink_height(len(lines), size) / 2
+    local = []
+    for index, line in enumerate(lines):
+        width = font.text_length(line, size)
+        x0 = box.x0 if anchor == "start" else box.x1 - width if anchor == "end" else (box.x0 + box.x1 - width) / 2
+        y0 = top + index * size * LINE_HEIGHT
+        local.append(fitz.Rect(x0, y0, x0 + width, y0 + size))
+    quads = [(rect + (0, -INK_MARGIN * size, 0, INK_MARGIN * size)).quad * back for rect in local]
+    inset = 0.25 * group["size"]
+    source_crosses = any(hits(b + (inset, inset, -inset, -inset), points)
+                         for line in group["lines"] for b in line["char_boxes"])
+    collides = not source_crosses and any(hits_quad(quad, points) for quad in quads)
+    overlaps = any(not _separated(_corners(quad), _corners(other)) for quad in quads for other in others)
+    status = "overlaps_label" if overlaps else "crosses_line_art" if collides else "ok"
+    return {"status": status, "size": size, "lines": lines, "local": local, "anchor": anchor,
+            "angle": group["angle"], "quads": quads,
+            "em_quads": [(rect + (0.2, 0.2, -0.2, -0.2)).quad * back for rect in local]}
+
+
+def set_rotated(page: Any, plan: dict[str, Any], name: str, color: tuple[float, float, float], fonts: Fonts) -> None:
+    fitz = _fitz()
+    back = fitz.Matrix(plan["angle"])
+    for text, rect in zip(plan["lines"], plan["local"]):
+        origin = fitz.Point(rect.x0, rect.y0 + fonts.baseline(name) * plan["size"]) * back
+        page.insert_text(origin, text, fontname=name, fontsize=plan["size"], color=color,
+                         morph=(origin, fitz.Matrix(-plan["angle"])))
 
 
 def ink_height(count: int, size: float) -> float:
@@ -548,15 +783,22 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
                    if t.replace("|", "") != g["text"]]
         out = picture_area(crop, caption)
         source_pieces, source_masks, source_cover = line_art(page, crop)
-        patches = {id(g): knockouts_of(g, source_masks, source_pieces) for g, _t in changed}
+        patches = {id(g): knockouts_of(g, source_masks, source_pieces) if g["dir"] == (1, 0) else []
+                   for g, _t in changed}
         for group, _t in changed:
             for line in group["lines"]:
+                if group["dir"] != (1, 0):
+                    # Glyph by glyph: the box of a slanted line would take its neighbours with it.
+                    for glyph in line["char_boxes"]:
+                        inset = 0.25 * min(glyph.width, glyph.height)
+                        page.add_redact_annot(glyph + (inset, inset, -inset, -inset), fill=False)
+                    continue
                 inset = min(line["bbox"].height * 0.25, line["size"] * 0.3)
                 page.add_redact_annot(line["bbox"] + (0.3, inset, -0.3, -inset), fill=False)
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE)
         removed, kept_patches = remove_patches(page, [r for rects in patches.values() for r in rects])
         # An underline goes with its words: painted out, unless another line crosses it.
-        underlines = [u for g, _t in changed for u in underlines_of(g, source_pieces)]
+        underlines = [u for g, _t in changed if g["dir"] == (1, 0) for u in underlines_of(g, source_pieces)]
         ground = [(d["rect"], d["seqno"], d["fill"]) for d in page.get_drawings() if d.get("fill")] if underlines else []
         crossing = visible_points(([(a, b, o) for a, b, o in source_pieces
                                     if not any(abs(a.y - u.y0) < 0.3 and abs(b.y - u.y0) < 0.3
@@ -575,9 +817,23 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
         footprints = {id(g): g["bbox"] + (0.5, 0.5, -0.5, -0.5) for g in groups}
         rows: list[dict[str, Any]] = []
 
+        def source_shape(group: dict[str, Any]) -> Any:
+            if group["dir"] == (1, 0):
+                return footprints[id(group)]
+            trim = 0.2 * group["size"]
+            return (group["rbox"] + (trim, trim, -trim, -trim)).quad * fitz.Matrix(group["angle"])
+
         def plan_for(group: dict[str, Any], target: str, max_size: float | None = None) -> dict[str, Any]:
             name = "zhb" if "Bold" in group["font"] else "zh"
+            if group["dir"] != (1, 0):
+                return plan_rotated(group, target, fonts.objects[name], points,
+                                    [source_shape(g) for g in groups if g is not group])
             align = alignment(group, groups, boxes)
+            # A row keeps to its box, or outside one to the source's own width (a ruled form's column).
+            room = boxes[group["box"]].width - 2 if group["box"] is not None else group["bbox"].width + 0.5 * group["size"]
+            rows = plan_rows(group, target, fonts.objects[name], room, align, points)
+            if rows is not None:
+                return rows
             others = [rect for key, rect in footprints.items() if key != id(group)]
             return choose(group, target, candidate_rects(group, groups, boxes, crop, align), align, points,
                           fonts.objects[name], bool(patches[id(group)]), others, max_size=max_size)
@@ -586,7 +842,9 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
         # smallest size any of them needs, so the list stays even.
         plans: dict[int, dict[str, Any]] = {id(group): plan_for(group, target) for group, target in changed}
         for group, target in changed:
-            column = [h for h, _t in changed if group["box"] is not None and h["box"] == group["box"]
+            if group["dir"] != (1, 0):
+                continue
+            column = [h for h, _t in changed if h["dir"] == (1, 0) and group["box"] is not None and h["box"] == group["box"]
                       and abs(h["bbox"].x0 - group["bbox"].x0) < 1.5 and h["size"] == group["size"]]
             if len(column) >= 3:
                 cap = min(plans[id(h)]["size"] for h in column)
@@ -598,11 +856,20 @@ def render_diagram(source_pdf: Path, exhibit: dict[str, Any], translations: list
         for group, target in changed:
             name = "zhb" if "Bold" in group["font"] else "zh"
             plan = plans[id(group)]
-            align = alignment(group, groups, boxes)
             if plan["status"] == "does_not_fit":
                 rows.append({"source": group["text"], "target": target.replace("|", ""), "status": "does_not_fit"})
                 continue
-            boxes_drawn = ink_boxes(plan["lines"], plan["rect"], plan["top"], plan["size"], align, fonts.objects[name])
+            if group["dir"] != (1, 0):
+                (set_upright if plan.get("upright") else set_rotated)(page, plan, name, _rgb(group["color"]), fonts)
+                drawn_by += [(id(group), quad, plan["size"]) for quad in plan["em_quads"]]
+                ink += [(quad.rect, group["size"]) for quad in plan["quads"]]
+                rows.append({"source": group["text"], "target": target.replace("|", ""), "status": plan["status"],
+                             "size_from": group["size"], "size_to": plan["size"], "lines": len(plan["lines"]),
+                             "angle": group["angle"], "anchor": plan["anchor"]})
+                continue
+            align = alignment(group, groups, boxes)
+            boxes_drawn = plan.get("rows") or ink_boxes(plan["lines"], plan["rect"], plan["top"], plan["size"], align,
+                                                        fonts.objects[name])
             drawn_by += [(id(group), box, plan["size"]) for box in boxes_drawn]
             if patches[id(group)]:
                 for box in boxes_drawn:
@@ -652,7 +919,7 @@ def _rgb(color: int) -> tuple[float, float, float]:
 # --- rendering a project's translated diagrams --------------------------------------
 
 # Bump when placement or checks change, so cached renders are redone.
-RENDERER_VERSION = 7
+RENDERER_VERSION = 8
 RENDER_REPORT = "qa/figure-render.json"
 
 
