@@ -77,6 +77,40 @@ class V1ContractTests(unittest.TestCase):
             self.assertIn("轴承预紧为 10 mm", rendered)
             self.assertIn('data-alignment-id="align-0001"', rendered)
 
+    def test_a_source_table_and_its_translation_are_kept_apart_for_word(self) -> None:
+        from book_translation_pro.alignment import TABLE_GAP
+
+        def item(order: int, source: str, target: str) -> dict:
+            return {"id": f"align-{order + 1:04d}", "order": order, "unit_id": f"unit-{order + 1:04d}",
+                    "book_node_id": None, "source_segment_ids": ["seg-000001"], "source_text": source,
+                    "target_text": target, "source_sha256": "a" * 64, "target_sha256": "b" * 64}
+
+        alignment = {"schema_version": 1, "source_fingerprint": "c" * 64, "target_language": "zh-CN", "items": [
+            item(0, "| Cost | 1 |\n|---|---|\n| Labor | 2 |", "| 成本 | 1 |\n|---|---|\n| 人工 | 2 |"),
+            item(1, "Prose after the table.", "表格之后的文字。"),
+        ]}
+        rendered = render_bilingual_markdown(alignment)
+        between = rendered[rendered.index("| Labor | 2 |"):rendered.index("| 成本 | 1 |")]
+        self.assertIn(f"\n{TABLE_GAP}\n", between)            # Word would otherwise join the two tables
+        self.assertEqual(rendered.count(TABLE_GAP), 1)        # and nowhere else
+
+    def test_an_emptied_source_unit_is_skipped_only_when_its_translation_is_a_comment(self) -> None:
+        from book_translation_pro.manifest import load_manifest
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _ = make_project(root)
+            entry = load_manifest(root)["units"][0]
+            atomic_write_text(root / entry["source_file"], "\n")
+            target = root / "target" / "edited" / "unit-0001.md"
+            atomic_write_text(target, "<!-- 本单元原文只剩图表碎片，已重建为下一单元中的表格。 -->\n")
+            alignment = create_segment_alignment(root, config)
+            self.assertEqual(alignment["items"], [])
+            self.assertEqual([s["unit_id"] for s in alignment["skipped_units"]], ["unit-0001"])
+            # A translation with real text under an empty source would vanish: fail loudly.
+            atomic_write_text(target, "<!-- 说明 -->\n\n轴承预紧为 10 mm。\n")
+            with self.assertRaisesRegex(BTPError, "source unit is empty but its translation is not"):
+                create_segment_alignment(root, config)
+
     def test_bilingual_pairs_blocks_when_both_sides_have_the_same_shape(self) -> None:
         def item(source: str, target: str) -> dict:
             return {
