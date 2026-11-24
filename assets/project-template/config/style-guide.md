@@ -20,6 +20,12 @@ Approved Glossary entries are binding within their scopes. Report conflicts with
 RULE-ID: terminology.first-use  
 For important specialist terms, use the approved Chinese term followed by the source term in parentheses on first use within the configured scope. Do not repeat the source term on every occurrence.
 
+RULE-ID: names.policy  
+People, organizations, places, and products: use the established Chinese name when standard reference works have one (丰田, 戴明), with the source name in parentheses at its first use in the book; otherwise keep the source spelling. Choose once per name and use it in every unit; record each choice in the observation's `new_entries` so later units follow it. Bibliographic citations keep authors and titles as published.
+
+RULE-ID: terminology.ledger  
+A domain term the glossary lacks is rendered once and then the same way throughout: follow `ledger_entries`, and record each new rendering in `new_entries`. Check a term's sense in the field before choosing (a "box score" in lean accounting is a performance report, not a box plot); do not leave a term in the source language unless it is a name or the field uses it untranslated, and then gloss it at first use.
+
 RULE-ID: names.models.standards  
 Do not translate product model numbers, code identifiers, URLs, or standard numbers. Translate official names only when an approved conventional target-language name is available.
 

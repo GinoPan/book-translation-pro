@@ -19,10 +19,11 @@ In Study mode, a passing automated QA report does not prove that pagination and 
 | Context Capsule | Previous continuity + core entities | Chapter summary, continuity, entities, references, unresolved issues | Study plus editorial voice and proof notes |
 | Initial translation | One pass | One pass | One pass from source evidence |
 | Edit Pass | Only flagged issues and joins | Every unit or section | Full editorial pass plus independent proof pass |
+| Translation review ([translation-quality.md](translation-quality.md)) | None | Independent reviewer reads 10% of each stretch plus every unit a rule signal points at; bar 10 weighted findings per 1,000 source words; `translation_review` checkpoint | Independent reviewer reads every unit (the proof pass); bar 5; `translation_review` checkpoint |
 | Visual QA | Level 3 and extraction failures | Levels 2–3 plus samples | All figures/tables/formulas/notes and page sampling |
 | Completeness QA | Required, blocking | Required, blocking | Required, blocking |
 | Terminology QA | Deterministic scan | Scan + semantic review of conflicts | Full review and signed exceptions |
-| Human checkpoints | Optional | Terminology checkpoint default | Terminology, visual exceptions, final signoff |
+| Human checkpoints | Optional | Terminology, source readiness, exhibits, translation review | Terminology, visual exceptions, source readiness, exhibits, translation review, final signoff |
 | Output | Reading-oriented | DOCX/EPUB/PDF as requested | Semantic XHTML/EPUB/DOCX/PDF and optional alignment-based bilingual editions |
 
 ## Visual risk levels

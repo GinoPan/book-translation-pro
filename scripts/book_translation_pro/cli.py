@@ -16,7 +16,7 @@ from .exhibit_review import build_exhibit_review, record_exhibit_review
 from .figure_render import render_project_figures
 from .figures import _figure_asset_name, normalize_image_backgrounds, reconstruct_figures
 from .exceptions import record_exceptions
-from .glossary import load_effective_glossary, save_glossary, select_entries, validate_glossary
+from .glossary import build_ledger, ledger_for_unit, load_effective_glossary, new_entry_problem, save_glossary, select_entries, validate_glossary
 from .manifest import load_manifest
 from .migration import migrate_project
 from .project import initialize_project, prepare_project, visualize_project
@@ -24,11 +24,14 @@ from .rights import INTENDED_USES, RIGHTS_STATUSES, rights_config, rights_warnin
 from .publication import publication_table_inventory
 from .publication_review import create_review_template, record_publication_review
 from .qa import run_qa
+from .quality_benchmark import benchmark
 from .release import release_check
 from .retrofit import exhibit_blocks, retrofit_exhibits
 from .runtime import doctor_report
 from .readiness import readiness_report
 from .runtime_adapters import conformance_cases
+from .translation_review import TEMPLATE as TRANSLATION_REVIEW_TEMPLATE
+from .translation_review import build_translation_review, record_translation_review, rule_proposals
 from .state import (
     dispatch_unit,
     load_state,
@@ -44,7 +47,7 @@ from .visual import record_visual_review, show_page
 # project lock so parallel workers cannot overwrite each other's records.
 PROJECT_LOCKED_COMMANDS = frozenset({
     "prepare", "visualize", "reconstruct-figures", "retrofit-exhibits", "render-figures", "exhibit-review", "source-readiness",
-    "normalize-images", "plan", "show-unit",
+    "translation-review", "quality-benchmark", "normalize-images", "plan", "show-unit",
     "record", "qa", "build", "typeset", "publication-review", "migrate",
 })
 
@@ -101,6 +104,10 @@ def _record_json(args: argparse.Namespace) -> dict[str, Any]:
         for field in ("new_entries", "conflicts", "source_issues", "used_glossary_ids"):
             if not isinstance(value.get(field, []), list):
                 raise BTPError(f"Observation field {field} must be an array")
+        for index, item in enumerate(value.get("new_entries", [])):
+            problem = new_entry_problem(item)
+            if problem:
+                raise BTPError(f"Observation new_entries[{index}]: {problem}")
         destination = safe_project_path(project, entry["observation_file"])
     if source != destination.resolve():
         atomic_copy(source, destination)
@@ -177,6 +184,9 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
     # dependency hashes and QA check.
     glossary = load_effective_glossary(project, config)
     selected = select_entries(glossary, source_text, entry["book_node_id"])
+    # Renderings earlier units chose for names and terms the glossary lacks: context to
+    # follow, not a dependency, so a growing ledger never makes a finished unit stale.
+    ledger = build_ledger(project, [item["unit_id"] for item in ordered])
     payload: dict[str, Any] = {
         "schema_version": 1,
         "phase": phase,
@@ -190,6 +200,7 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
             project, ordered, index, config["context_capsule"]["max_characters"]
         ),
         "glossary_entries": selected,
+        "ledger_entries": ledger_for_unit(ledger, source_text, selected),
         "custom_instructions": config.get("custom_instructions", []),
         "rights": rights_config(config),
         "data_handling": (
@@ -222,6 +233,18 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
     payload["exhibits"] = _unit_exhibits(project, source_text)
     if phase == "edit":
         payload["draft_file"] = str(safe_project_path(project, entry["draft_file"]))
+    if phase == "review":
+        target_field = "edit_file" if config["passes"]["edit"] else "draft_file"
+        payload["target_file"] = str(safe_project_path(project, entry[target_field]))
+        template = project / TRANSLATION_REVIEW_TEMPLATE
+        if not template.is_file():
+            raise BTPError("Run translation-review before reviewing units")
+        item = next((i for i in load_json(template)["items"] if i["unit_id"] == unit_id), None)
+        if item is None:
+            raise BTPError(f"{unit_id} is not among the units selected for review")
+        payload["review_file"] = str(template)
+        payload["review_reasons"] = item["reasons"]
+        payload["earlier_findings"] = item["findings"]
     if phase == "translate":
         payload["dependency_hashes"] = dispatch_unit(project, unit_id)
     return payload
@@ -366,6 +389,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_readiness.add_argument("project")
     p_readiness.set_defaults(handler=lambda args: readiness_report(_project(args.project)))
 
+    p_translation_review = sub.add_parser(
+        "translation-review",
+        help="Select the units for an independent translation review and write the review file and overview page",
+    )
+    p_translation_review.add_argument("project")
+    p_translation_review.set_defaults(handler=lambda args: build_translation_review(
+        _project(args.project), load_resolved_project(_project(args.project))[0]))
+
+    p_benchmark = sub.add_parser(
+        "quality-benchmark",
+        help="Plant known errors in copies of the translated units and measure which checks catch them",
+    )
+    p_benchmark.add_argument("project")
+    p_benchmark.add_argument("--output", help="Directory for the report (default: the project's qa folder)")
+    p_benchmark.set_defaults(handler=lambda args: benchmark(
+        _project(args.project), load_resolved_project(_project(args.project))[0],
+        normalize_path(Path(args.output)) if args.output else None))
+
+    p_rules = sub.add_parser(
+        "quality-rules",
+        help="Group recorded review findings across books by cause and propose rules for the recurring ones",
+    )
+    p_rules.add_argument("projects", nargs="+")
+    p_rules.add_argument("--min-count", type=int, default=3)
+    p_rules.add_argument("--output", help="Directory for the report (default: the first project's qa folder)")
+    p_rules.set_defaults(handler=lambda args: rule_proposals(
+        [_project(p) for p in args.projects], args.min_count, normalize_path(Path(args.output)) if args.output else None))
+
     p_normalize_images = sub.add_parser(
         "normalize-images",
         help="Flip inverted dark-background line-art scans back to dark-on-white",
@@ -389,7 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_show = sub.add_parser("show-unit", help="Show a runtime-neutral work-item package")
     p_show.add_argument("project")
     p_show.add_argument("unit")
-    p_show.add_argument("--phase", choices=("capsule", "translate", "edit"), default="translate")
+    p_show.add_argument("--phase", choices=("capsule", "translate", "edit", "review"), default="translate")
     p_show.set_defaults(handler=lambda args: show_unit(_project(args.project), args.unit, args.phase))
 
     p_show_page = sub.add_parser("show-page", help="Show one page evidence package and review file")
@@ -399,7 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_record = sub.add_parser("record", help="Validate and record a worker result or checkpoint")
     p_record.add_argument("project")
-    p_record.add_argument("--kind", required=True, choices=("draft", "edit", "capsule", "observation", "glossary", "visual-review", "publication-review", "exhibit-review", "exceptions", "review", "failure"))
+    p_record.add_argument("--kind", required=True, choices=("draft", "edit", "capsule", "observation", "glossary", "visual-review", "publication-review", "exhibit-review", "translation-review", "exceptions", "review", "failure"))
     p_record.add_argument("--unit")
     p_record.add_argument("--input")
     p_record.add_argument("--checkpoint")
@@ -439,6 +490,10 @@ def build_parser() -> argparse.ArgumentParser:
             if not args.input:
                 raise BTPError("--input is required")
             return record_exhibit_review(project, config, Path(args.input).resolve())
+        if args.kind == "translation-review":
+            if not args.input:
+                raise BTPError("--input is required")
+            return record_translation_review(project, config, Path(args.input).resolve())
         if args.kind == "publication-review":
             if not args.input:
                 raise BTPError("--input is required")

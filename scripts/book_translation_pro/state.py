@@ -109,6 +109,10 @@ def initialize_state(
             notes = f"Pending required page reviews: {pending_pages}" if pending_pages else "No page meets the mode review threshold."
         elif name == "exhibits":
             status, notes = exhibits_review_default(bool(visual_summary.get("applicable")))
+        elif name == "translation_review":
+            from .translation_review import default_status
+
+            status, notes = default_status()
         else:
             status, notes = "pending", ""
         reviews.append({"checkpoint": name, "status": status, "recorded_at": now_utc(), "notes": notes})
@@ -459,6 +463,10 @@ def record_review(project: Path, checkpoint: str, approved: bool, reviewer: str,
         from .readiness import readiness_evidence
 
         evidence_hashes = readiness_evidence(project, notes)
+    if checkpoint == "translation_review" and approved:
+        from .translation_review import review_evidence as translation_evidence
+
+        evidence_hashes = translation_evidence(project, load_resolved_project(project)[0])
     found = False
     for item in state.get("human_reviews", []):
         if item["checkpoint"] == checkpoint:

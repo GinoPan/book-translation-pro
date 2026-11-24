@@ -155,6 +155,26 @@ def complete_fake_semantic_work(project: Path) -> None:
     assert not queue["translation_unit_ids"], queue
     assert not queue["edit_unit_ids"], queue
     complete_fake_exhibit_review(project, config)
+    complete_fake_translation_review(project, config)
+
+
+def complete_fake_translation_review(project: Path, config: dict) -> None:
+    """A Study or Publication book waits for the translation_review checkpoint: judge the
+    selected units, record the review, approve."""
+    if not any(item["checkpoint"] == "translation_review" and item["status"] == "pending"
+               for item in load_state(project).get("human_reviews", [])):
+        return
+    from book_translation_pro.translation_review import TEMPLATE, build_translation_review, record_translation_review
+
+    build_translation_review(project, config)
+    review = load_json(project / TEMPLATE)
+    review["reviewer"] = "integration-test-reviewer"
+    for item in review["items"]:
+        item["verdict"] = "ok"
+    filled = project / "qa" / "translation-review-filled.json"
+    atomic_write_json(filled, review)
+    record_translation_review(project, config, filled)
+    record_review(project, "translation_review", True, "integration-test", "fixture translation accepted")
 
 
 def complete_fake_exhibit_review(project: Path, config: dict) -> None:

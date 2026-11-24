@@ -40,6 +40,15 @@ The following are blocking in every mode:
 
 Deterministic checks should also compare heading counts, image/table/formula references, numbers and units, footnote/endnote anchors and placement, untranslated residue, and glossary variants (an approved Latin-script target must appear as a whole word, so `art` is not found in `start`). Footnote markers must remain superscript references attached to the intended term; they must not become quantity words such as “11个 5S”. Differences may be warnings only when a reviewed explanation exists.
 
+## Translation quality gate
+
+The standard, the checks, and their measured strength are in [translation-quality.md](translation-quality.md).
+
+- A sentence the target repeats more often than the source repeats any, within a unit or across the join of two units, is blocking (`content.repeated_text`). Source copies are found on the joined source text, so a copy wrapped across lines or printed without its full stop still counts as the source's own repeat.
+- Target-language typography (`style.typography`), a name printed in English in some units and translated in others (`terminology.name_consistency`), a unit departing from a recorded ledger rendering (`terminology.ledger`), and a term recorded with two renderings (`terminology.ledger_conflict`) are warnings. A target language without a profile is reported as not checked.
+- When a fifth or more of the units carry a reflow or reconstruction note, QA warns that their paragraph, length, and number checks only warn there (`content.excused_units`).
+- With the `translation_review` checkpoint (Study and Publication): a recorded review is required and must match the current units (`translation_review.record`) and cover the selected units (`translation_review.coverage`); an open major or critical finding fails (`translation_review.open`); a stretch whose sample scored above the bar fails until all its units are reviewed (`translation_review.sample`); open findings above the bar fail (`translation_review.score`); and the checkpoint approval must be for the recorded review (`translation_review.approval`).
+
 ## Visual gate
 
 - Page Map covers the pages required by the selected mode.

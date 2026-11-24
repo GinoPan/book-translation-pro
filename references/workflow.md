@@ -81,7 +81,7 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
    If a source exhibit is vector-only or its extraction contains only scattered labels, run `BTP reconstruct-figures <project-dir>` after target captions exist. The command reuses or creates the deterministic crop, places it before the mapped target caption, removes only the safe OCR-label tail, and skips existing visuals, native tables, and explicit structured reconstructions. Review the `target_repairs` section, record changed target units and the reconstruction observation, then run QA.
 
-5. Read `terminology/bootstrap-samples.json`, inspect those source work units, author `terminology/glossary.json`, and record it:
+5. Read `terminology/bootstrap-samples.json` and inspect those source work units. Also read `terminology/term-candidates.json`: the phrases and names that recur across the whole book, which samples miss. Check each candidate's sense in the field before giving it a target. Author `terminology/glossary.json` and record it:
 
    ```text
    BTP record <project-dir> --kind glossary --input <glossary.json>
@@ -97,7 +97,7 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
 7. Run `BTP plan <project-dir>`. Resolve every `blocked` item. Use `translation_unit_ids`, `record_only_unit_ids`, and `edit_unit_ids` exactly; do not rediscover the queue from directory listings.
 
-8. For each translation unit, inspect `show-unit --phase translate`, dispatch one isolated worker, then record its draft and observation. `show-unit --phase translate` snapshots the unit's inputs under `state/dispatch/`; `record --kind draft` refuses a draft when no package was issued or when the source, Glossary selection, Style Guide, incoming capsule, or configuration changed after issue. Parallel workers may record concurrently: every state-changing command takes the project lock (`.btp.lock`, wait limit `BTP_LOCK_TIMEOUT`, default 600 s). The work package includes mapped source-page images and crops. When available, attach `--duration-seconds`, `--input-tokens`, `--output-tokens`, `--cost`, and `--currency`; these are audit metrics, never semantic dependencies. After each batch, review observations and transactionally update the Glossary through `record --kind glossary`; rerun `plan` because the update may invalidate earlier units.
+8. For each translation unit, inspect `show-unit --phase translate`, dispatch one isolated worker, then record its draft and observation. `show-unit --phase translate` snapshots the unit's inputs under `state/dispatch/`; `record --kind draft` refuses a draft when no package was issued or when the source, Glossary selection, Style Guide, incoming capsule, or configuration changed after issue. Parallel workers may record concurrently: every state-changing command takes the project lock (`.btp.lock`, wait limit `BTP_LOCK_TIMEOUT`, default 600 s). The work package includes mapped source-page images and crops. When available, attach `--duration-seconds`, `--input-tokens`, `--output-tokens`, `--cost`, and `--currency`; these are audit metrics, never semantic dependencies. After each batch, review observations and transactionally update the Glossary through `record --kind glossary`; rerun `plan` because the update may invalidate earlier units. The renderings workers record in `new_entries` form the ledger (`terminology/ledger.json`), which later packages carry as `ledger_entries`; promote a ledger entry to the glossary when it should bind, and resolve a ledger conflict (one term, two renderings) before more units translate it.
 
 9. For each edit unit, inspect `show-unit --phase edit`, author a separate edited file, and record it with `record --kind edit`.
 
@@ -110,9 +110,18 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
    The approval is bound to the recorded review; any later change to a label, table, or render makes it stale.
 
-11. Run `BTP qa <project-dir>`. This runs Visual QA, Completeness QA, and the source-PDF exhibit inventory together. Fix every blocking issue, including vector-only exhibits that have a target caption but no visual asset or auditable reconstruction record. In Publication mode, warnings must be resolved or entered in an approved `qa/exceptions.json` record.
+11. In Study and Publication mode, run the independent translation review ([translation-quality.md](translation-quality.md); the protocol is in [translation-protocol.md](translation-protocol.md#translation-review)). `BTP translation-review <project-dir>` selects the units (Publication: all; Study: a share of each stretch of the book plus every unit a rule signal points at). A reviewer who did not translate them judges each with `show-unit <unit> --phase review` and records findings by category, severity, and cause. Fix the findings, record the edits, rerun `translation-review`, and record the judged file. Show the user `qa/translation-review/index.html`, and after their approval:
 
-12. Create and render a candidate with `BTP typeset <project-dir>`. Run `BTP publication-review <project-dir>`, complete all seven checks in the generated template, and record the review:
+   ```text
+   BTP record <project-dir> --kind translation-review --input <judged-review.json>
+   BTP record <project-dir> --kind review --checkpoint translation_review --approve --reviewer <name>
+   ```
+
+   The approval is refused while an open major or critical finding, open findings above the bar, or a stretch whose sample scored above the bar remain, and any later change to a reviewed unit makes the review stale. Across finished books, `BTP quality-rules <project-dir> [<project-dir> ...]` proposes rules from recurring causes, and `BTP quality-benchmark <project-dir>` measures the checks by planting known errors.
+
+12. Run `BTP qa <project-dir>`. This runs Visual QA, Completeness QA, the translation rule checks, and the source-PDF exhibit inventory together. Fix every blocking issue, including vector-only exhibits that have a target caption but no visual asset or auditable reconstruction record. In Publication mode, warnings must be resolved or entered in an approved `qa/exceptions.json` record.
+
+13. Create and render a candidate with `BTP typeset <project-dir>`. Run `BTP publication-review <project-dir>`, complete all seven checks in the generated template, and record the review:
 
    ```text
    BTP record <project-dir> --kind publication-review --input <completed-review.json>
@@ -121,7 +130,7 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
    If a check uses an exception, record the approved exception list first with `BTP record <project-dir> --kind exceptions --input <exceptions.json>`.
 
-13. Rerun `BTP qa <project-dir>`, then `BTP build <project-dir>` and `BTP status <project-dir>`. Publication `build` copies the reviewed candidate files byte-for-byte into `dist/` and verifies their hashes.
+14. Rerun `BTP qa <project-dir>`, then `BTP build <project-dir>` and `BTP status <project-dir>`. Publication `build` copies the reviewed candidate files byte-for-byte into `dist/` and verifies their hashes.
 
 For layout iteration before QA is green, run `BTP typeset <project-dir>`. This creates a clearly marked review candidate under `dist/typeset-preview/` and never changes the build stage or bypasses the final build gate. Any later candidate, clean-master, review, exception, or generated-file change invalidates the recorded signoff.
 
@@ -173,6 +182,7 @@ It produces:
 - `terminology`: before bulk translation when configured; default on for Study and Publication.
 - `visual-exceptions`: when reading order or OCR confidence is below the mode threshold.
 - `source_readiness`: after `prepare`, before any translation; default on for Study and Publication.
+- `translation_review`: after the edit pass, before QA can pass; default on for Study and Publication. A project prepared before it existed gets it as pending on its next `prepare`, since its translation was never independently reviewed.
 - `publication-signoff`: required before Publication is marked complete.
 
 ## Resume

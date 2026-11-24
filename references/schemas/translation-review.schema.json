@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://book-translation-pro.local/schemas/translation-review.schema.json",
+  "title": "Book Translation Pro translation review",
+  "type": "object",
+  "required": ["schema_version", "reviewer", "reviewed_at", "scope", "chapters", "items"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "reviewer": {"type": "string"},
+    "reviewed_at": {"type": "string"},
+    "scope": {"enum": ["sample", "all"]},
+    "chapters": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["units", "source_words"],
+        "properties": {
+          "units": {"type": "integer", "minimum": 0},
+          "source_words": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["unit_id", "chapter", "source_words", "reasons", "evidence", "verdict", "findings"],
+        "properties": {
+          "unit_id": {"type": "string", "pattern": "^unit-[0-9]{4,}$"},
+          "chapter": {"type": "string"},
+          "source_words": {"type": "integer", "minimum": 0},
+          "reasons": {"type": "array", "items": {"type": "string"}},
+          "evidence": {"type": "string", "minLength": 64, "maxLength": 64},
+          "verdict": {"enum": ["pending", "ok", "findings"]},
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["category", "severity", "status", "cause", "source_excerpt", "target_excerpt", "note"],
+              "properties": {
+                "category": {"enum": [
+                  "accuracy.mistranslation", "accuracy.omission", "accuracy.addition", "accuracy.untranslated",
+                  "terminology.inconsistent", "terminology.wrong_term",
+                  "fluency.grammar", "fluency.unnatural",
+                  "style.register", "locale.conventions", "structure.markup"
+                ]},
+                "severity": {"enum": ["minor", "major", "critical"]},
+                "status": {"enum": ["open", "fixed", "dismissed"]},
+                "cause": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+                "source_excerpt": {"type": "string", "minLength": 1, "maxLength": 600},
+                "target_excerpt": {"type": "string", "maxLength": 600},
+                "note": {"type": "string", "minLength": 1},
+                "fix": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

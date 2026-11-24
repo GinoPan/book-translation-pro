@@ -153,3 +153,63 @@ def render_review(glossary: dict[str, Any]) -> str:
 
 def empty_glossary() -> dict[str, Any]:
     return {"schema_version": 1, "entries": []}
+
+
+# --- term and name ledger -----------------------------------------------------------------
+# The renderings translators chose for names and domain terms the glossary lacks, as they
+# recorded them in their observations (``new_entries``).  Derived, never edited: it is
+# rebuilt from the observations, shown to later units by ``show-unit``, and checked by QA.
+LEDGER = Path("terminology") / "ledger.json"
+CATEGORIES = ("person", "place", "organization", "title", "technical_term", "product", "standard", "unit", "other")
+
+
+def new_entry_problem(entry: Any) -> str | None:
+    """Why an observation ``new_entries`` item cannot go into the ledger, or None."""
+    if not isinstance(entry, dict):
+        return "an entry must be an object with source, target, and category"
+    for field in ("source", "target"):
+        if not str(entry.get(field, "")).strip():
+            return f"an entry needs a non-empty {field}"
+    if entry.get("category") not in CATEGORIES:
+        return f"category must be one of {', '.join(CATEGORIES)}"
+    return None
+
+
+def build_ledger(project: Path, unit_order: list[str]) -> dict[str, Any]:
+    """Collect every recorded rendering, in reading order, and write the ledger."""
+    entries: dict[str, dict[str, Any]] = {}
+    skipped = 0
+    for unit_id in unit_order:
+        path = project / "state" / "observations" / f"{unit_id}.json"
+        if not path.is_file():
+            continue
+        try:
+            new_entries = load_json(path).get("new_entries", [])
+        except BTPError:
+            continue  # QA reports an unreadable observation itself
+        for item in new_entries if isinstance(new_entries, list) else []:
+            if new_entry_problem(item):
+                skipped += 1
+                continue
+            key = item["source"].casefold().strip()
+            entry = entries.setdefault(key, {"source": item["source"].strip(), "category": item["category"],
+                                             "targets": [], "units": []})
+            if item["target"].strip() not in entry["targets"]:
+                entry["targets"].append(item["target"].strip())
+            if unit_id not in entry["units"]:
+                entry["units"].append(unit_id)
+    ledger = {"schema_version": 1, "entries": sorted(entries.values(), key=lambda e: e["source"].casefold()),
+              "skipped": skipped}
+    atomic_write_json(project / LEDGER, ledger)
+    return ledger
+
+
+def ledger_for_unit(ledger: dict[str, Any], source_text: str, glossary_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ledger entries the unit's source mentions and its glossary selection does not cover."""
+    chosen = []
+    for entry in ledger.get("entries", []):
+        rule = {"source": entry["source"], "aliases": []}
+        if entry_matches(rule, source_text) and not any(entry_matches(g, entry["source"]) for g in glossary_entries):
+            chosen.append({"source": entry["source"], "category": entry["category"], "targets": entry["targets"],
+                           "first_unit": entry["units"][0]})
+    return chosen
