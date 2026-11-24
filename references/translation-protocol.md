@@ -50,6 +50,7 @@ QA blocks omitted paragraphs, truncated units, and text left in the source langu
 - `structure_reflowed: <reason>`: prose blocks were legitimately merged or removed (for example, OCR label fragments)
 - `untranslated_by_design: <reason>`: material intentionally kept in the source language (for example, a bibliography)
 - `source_error_corrected: <printed> -> <corrected> (exhibit <key>): <reason>`: a misprinted value was corrected (see Exhibits)
+- `term_not_applicable: <glossary entry id> (<reason>)`: an approved term that the source mentions rightly does not appear in this unit's target (for example, its sentence was translated in the neighbouring unit, the source line is exhibit text kept as an image, or the content was omitted by decision). QA reports it as a warning with the reason instead of failing; name one entry per declaration
 
 ## Exhibits
 

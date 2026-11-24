@@ -522,6 +522,50 @@ class GlossaryInflection(unittest.TestCase):
         ):
             self.assertEqual([entry["id"] for entry in select_entries(glossary, text)], expected, text)
 
+    def test_a_hyphenated_compound_is_another_term(self) -> None:
+        glossary = {"entries": [
+            {"id": "value", "source": "Value", "target": "价值", "status": "approved"},
+            {"id": "sw", "source": "Standard work", "target": "标准作业", "status": "approved"},
+            {"id": "jit", "source": "Just-in-time", "target": "准时化", "status": "approved"},
+        ]}
+        for text, expected in (
+            ("Customer value comes first.", ["value"]),
+            ("value-added and non-value-added steps", []),
+            ("Use standard work daily.", ["sw"]),
+            ("standard work-in-process inventory", []),
+            ("standard work - in practice", ["sw"]),
+            ("a just-in-time framework", ["jit"]),
+        ):
+            self.assertEqual([entry["id"] for entry in select_entries(glossary, text)], expected, text)
+
+
+class TermCheckSource(unittest.TestCase):
+    """terminology.approved reads the source lines the translation keeps."""
+
+    def test_running_heads_stamps_and_scrambled_lines_are_left_out(self) -> None:
+        from book_translation_pro.qa import _term_source
+
+        source = "\n".join([
+            "ch04_4772.qxd 2/2/07 3:39 PM Page 88",
+            "**88** **Lean Accounting**",
+            "**Creating a New Framework** **87**",
+            "t s s t u st y yi Lean Accounting o r",
+            "Lean Accounting changes how costs are reported.",
+            "**Lean Accounting**",
+            "Lean Accounting is in an IT box.",
+        ])
+        kept = _term_source(source).splitlines()
+        self.assertEqual(kept, ["Lean Accounting changes how costs are reported.", "**Lean Accounting**",
+                                "Lean Accounting is in an IT box."])
+
+    def test_a_prose_mention_still_fails_without_the_approved_target(self) -> None:
+        from book_translation_pro.qa import _term_source
+
+        glossary = {"entries": [{"id": "la", "source": "Lean Accounting", "target": "精益会计", "status": "approved"}]}
+        source = "**88** **Lean Accounting**\n\nLean Accounting changes how costs are reported."
+        self.assertEqual([e["id"] for e in select_entries(glossary, _term_source(source))], ["la"])
+        self.assertEqual(select_entries(glossary, _term_source("**88** **Lean Accounting**")), [])
+
 
 class ConcurrentRecording(unittest.TestCase):
     def test_parallel_workers_do_not_lose_records(self) -> None:
