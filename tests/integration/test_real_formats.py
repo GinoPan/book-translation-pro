@@ -119,6 +119,9 @@ def complete_fake_semantic_work(project: Path) -> None:
     config, _ = load_resolved_project(project)
     manifest = load_manifest(project)
     record_review(project, "terminology", True, "integration-test", "empty glossary accepted")
+    if config["mode"] != "fast":
+        # The fixtures' readiness reports are accepted as they stand; their problems are not under test here.
+        record_review(project, "source_readiness", True, "integration-test", "fixture source accepted")
     review_dir = project / "qa" / "visual-reviews"
     for review_path in sorted(review_dir.glob("page-*.json")):
         review = __import__("json").loads(review_path.read_text(encoding="utf-8"))

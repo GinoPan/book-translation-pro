@@ -30,7 +30,7 @@ TEMPLATE = f"{REVIEW_DIR}/review.json"
 OVERVIEW = f"{REVIEW_DIR}/index.html"
 RECORD = "qa/exhibit-review.json"
 CHECKPOINT = "exhibits"
-TREATED_TABLES = {"table_grid", "table_lists"}
+TREATED_TABLES = {"table_grid", "table_lists", "text_list"}
 SIDE_HEIGHT = 900          # pixels; each side of a comparison is scaled to at most this
 
 
@@ -148,7 +148,17 @@ def _original(document: Any, exhibit: dict[str, Any]) -> Any:
     area = exhibit.get("crop") or exhibit.get("region")
     clip = fitz.Rect(area) | fitz.Rect(exhibit["caption_bbox"]) if area else page.rect
     pix = page.get_pixmap(dpi=200, clip=clip + (-6, -6, 6, 6), alpha=False)
-    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    # A table that runs on to further pages is shown whole, its parts one under another.
+    for more in exhibit.get("continued", []):
+        next_page, _r, _h = upright_page(document, more["page"])
+        part = next_page.get_pixmap(dpi=200, clip=fitz.Rect(more["region"]) + (-6, -6, 6, 6), alpha=False)
+        below = Image.frombytes("RGB", (part.width, part.height), part.samples)
+        joined = Image.new("RGB", (max(image.width, below.width), image.height + below.height), "white")
+        joined.paste(image, (0, 0))
+        joined.paste(below, (0, image.height))
+        image = joined
+    return image
 
 
 def _unescape(text: str) -> str:

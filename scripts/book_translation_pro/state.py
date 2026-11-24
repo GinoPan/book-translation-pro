@@ -271,6 +271,14 @@ def plan_run(project: Path, require_edit: bool, max_attempts: int) -> dict[str, 
         blocked.append("checkpoint_pending:terminology")
     if _review_pending(state, "visual_exceptions"):
         blocked.append("checkpoint_pending:visual_exceptions")
+    if _review_pending(state, "source_readiness"):
+        blocked.append("checkpoint_pending:source_readiness")
+    else:
+        from .readiness import approval_is_stale
+
+        readiness = next((item for item in state.get("human_reviews", []) if item["checkpoint"] == "source_readiness"), None)
+        if readiness is not None and approval_is_stale(project, readiness):
+            blocked.append("checkpoint_stale:source_readiness")
     if state["source_fingerprint"] != manifest["source_fingerprint"]:
         blocked.append("source_fingerprint_changed")
     if state["resolved_config_hash"] != manifest["resolved_config_hash"]:
@@ -447,6 +455,10 @@ def record_review(project: Path, checkpoint: str, approved: bool, reviewer: str,
         from .exhibit_review import review_evidence
 
         evidence_hashes = review_evidence(project, load_resolved_project(project)[0])
+    if checkpoint == "source_readiness" and approved:
+        from .readiness import readiness_evidence
+
+        evidence_hashes = readiness_evidence(project, notes)
     found = False
     for item in state.get("human_reviews", []):
         if item["checkpoint"] == checkpoint:

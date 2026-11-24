@@ -85,6 +85,50 @@ STRUCTURED_RECONSTRUCTION_PREFIXES = (
 FRAGMENT_IMAGE_MIN_SIDE = 32
 
 
+IMAGE_TOKEN_RE = re.compile(r"!\[[^\]]*\]\((?P<md>[^)\s]+)\)|<img\b[^>]*?\bsrc\s*=\s*[\"'](?P<html>[^\"']+)[\"'][^>]*>",
+                            re.IGNORECASE)
+
+
+def drop_image_slivers(project: Path, markdown: str) -> tuple[str, int]:
+    """Remove images too narrow to be pictures (slivers a converter cut from a drawing).
+
+    Only an image whose file exists and is under ``FRAGMENT_IMAGE_MIN_SIDE`` pixels
+    on its shorter side goes; text, real pictures, and references to missing
+    files stay.  A line left empty by the removal goes too.  Returns the text and
+    the number of images removed.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return markdown, 0
+    sizes: dict[str, bool] = {}
+
+    def sliver(src: str) -> bool:
+        if src not in sizes:
+            try:
+                with Image.open(safe_project_path(project, src.replace("\\", "/"))) as image:
+                    sizes[src] = min(image.size) < FRAGMENT_IMAGE_MIN_SIDE
+            except (BTPError, OSError, ValueError):
+                sizes[src] = False
+        return sizes[src]
+
+    removed = 0
+    lines = []
+    for line in markdown.split("\n"):
+        def drop(match: re.Match[str]) -> str:
+            nonlocal removed
+            if sliver(match["md"] or match["html"]):
+                removed += 1
+                return ""
+            return match.group(0)
+
+        kept = IMAGE_TOKEN_RE.sub(drop, line)
+        if kept != line and not kept.strip():
+            continue
+        lines.append(kept)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)), removed
+
+
 def _meaningful_image_refs(project: Path, markdown: str) -> Counter[str]:
     """Return only image references whose local payload is a real visual."""
     refs = Counter(IMAGE_RE.findall(markdown))
@@ -581,6 +625,51 @@ def _label_lines(page: Any) -> list[tuple[Any, str]]:
     ]
 
 
+# Diagrams stacked under one caption ("Type 1", "Type 2") stand farther apart
+# than the parts of one drawing; the next one is joined across at most this gap.
+STACK_GAP = 48.0
+
+
+def _join_stacked(page: Any, crop: Any, orientation: str, others: list[Any]) -> Any:
+    """Widen ``crop`` over further drawings on its far side from the caption.
+
+    One is joined only when it shares most of the crop's width, the gap
+    between them holds no running text and no caption, only short titles
+    (a page with a paragraph between two figures keeps them apart), and no
+    caption of its own sits next to it.
+    """
+    import fitz
+
+    lines = [
+        (fitz.Rect(line["bbox"]), " ".join(" ".join(str(span["text"]) for span in line["spans"]).split()))
+        for block in page.get_text("dict").get("blocks", []) for line in block.get("lines", [])
+    ]
+    while True:
+        if orientation == "above_caption":
+            beyond = [other for other in others if other.y1 <= crop.y0 + 2]
+            nearest = max(beyond, key=lambda other: other.y1, default=None)
+            gap = fitz.Rect(crop.x0, nearest.y1, crop.x1, crop.y0) if nearest else None
+        else:
+            beyond = [other for other in others if other.y0 >= crop.y1 - 2]
+            nearest = min(beyond, key=lambda other: other.y0, default=None)
+            gap = fitz.Rect(crop.x0, crop.y1, crop.x1, nearest.y0) if nearest else None
+        if nearest is None or abs(gap.height) > STACK_GAP:
+            return crop
+        shared = min(crop.x1, nearest.x1) - max(crop.x0, nearest.x0)
+        if shared < 0.5 * min(crop.width, nearest.width):
+            return crop
+        between = [text for rect, text in lines
+                   if text and rect.y0 >= gap.y0 - 1 and rect.y1 <= gap.y1 + 1 and rect.x1 > gap.x0 and rect.x0 < gap.x1
+                   and (SOURCE_CAPTION_RE.match(text) or rect.width > 0.5 * crop.width or text.endswith((".", "。")))]
+        # A drawing with a caption of its own beside it is another exhibit.
+        owned = [text for rect, text in lines
+                 if SOURCE_CAPTION_RE.match(text) and (nearest + (0, -24, 0, 24)).intersects(rect)]
+        if between or owned:
+            return crop
+        crop |= nearest
+        others = [other for other in others if other != nearest]
+
+
 def _figure_crop_box(
     page: Any,
     caption_bbox: list[float],
@@ -610,6 +699,7 @@ def _figure_crop_box(
         return None
 
     candidates_by_orientation: list[tuple[Any, str, float]] = []
+    crops_by_orientation: dict[str, list[Any]] = {}
     for orientation in ("below_caption", "above_caption"):
         header_zone = page.rect.y0 + page.rect.height * 0.15
         if orientation == "below_caption":
@@ -634,6 +724,7 @@ def _figure_crop_box(
                 continue
             distance = (crop.y0 - caption.y1) if orientation == "below_caption" else (caption.y0 - crop.y1)
             candidates_by_orientation.append((crop, orientation, float(distance)))
+            crops_by_orientation.setdefault(orientation, []).append(crop)
     if not candidates_by_orientation:
         return None
     candidates_by_orientation.sort(key=lambda item: item[2])
@@ -650,6 +741,8 @@ def _figure_crop_box(
         candidates_by_orientation[0][:2],
     )
     crop, orientation = chosen
+    crop = _join_stacked(page, crop, orientation, [
+        other for other in crops_by_orientation[orientation] if other != crop and not conflicts(other)])
     # Tick values and axis titles sit just outside the drawn geometry; take
     # them into the crop so the figure keeps them and the text loses them.
     # Never a caption (this exhibit's or a neighbour's), and never text inside

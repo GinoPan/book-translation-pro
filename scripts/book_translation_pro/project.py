@@ -23,6 +23,7 @@ from .artifacts import (
     validate_schema,
 )
 from .config import extraction_config_hash, persist_overrides, resolve_project, write_yaml
+from .figures import drop_image_slivers
 from .glossary import empty_glossary, load_effective_glossary, load_glossary, render_review, save_glossary
 from .ingest import SUPPORTED_SUFFIXES, convert_to_markdown, source_format
 from .manifest import create_manifest
@@ -300,8 +301,14 @@ def _refresh_config(project: Path, resolved: dict[str, Any], config_hash: str, m
     state["human_reviews"] = [item for item in state.get("human_reviews", []) if item["checkpoint"] in checkpoints]
     for name in checkpoints:
         if name not in existing:
-            status, notes = (exhibits_review_default(resolved["source"].get("format") == "pdf") if name == "exhibits"
-                             else ("pending", ""))
+            if name == "exhibits":
+                status, notes = exhibits_review_default(resolved["source"].get("format") == "pdf")
+            elif name == "source_readiness":
+                # The units were prepared, and may be translated, before this gate existed.
+                status, notes = "not_required", ("Units were prepared before the source readiness gate; "
+                                                 "run `source-readiness` to check them anyway.")
+            else:
+                status, notes = "pending", ""
             state["human_reviews"].append({"checkpoint": name, "status": status, "recorded_at": now_utc(), "notes": notes})
     for name in ("qa", "build"):
         state["stages"][name].update({"status": "invalidated", "reason_codes": ["config_changed"], "updated_at": now_utc()})
@@ -423,6 +430,15 @@ def prepare_project(
         from .retrofit import retrofit_prepared_units
 
         exhibits = retrofit_prepared_units(project, resolved, [unit["id"] for unit in units])
+    # Slivers a converter cut from drawings go only now: the exhibit step above uses
+    # one beside a caption as the sign of where the converted figure was.
+    slivers_removed = 0
+    for unit in units:
+        unit_path = project / "source-work" / "work-units" / f"{unit['id']}.md"
+        text, removed = drop_image_slivers(project, unit_path.read_text(encoding="utf-8"))
+        if removed:
+            atomic_write_text(unit_path, text)
+            slivers_removed += removed
 
     glossary_path = project / "terminology" / "glossary.json"
     if glossary_path.is_file():
@@ -494,6 +510,11 @@ def prepare_project(
         _merge_reviews(state, previous_state.get("human_reviews", []), checkpoints)
     markup_only = _complete_markup_only_units(project, manifest, state)
     save_state(project, state)
+    readiness = None
+    if "source_readiness" in checkpoints:
+        from .readiness import readiness_report
+
+        readiness = readiness_report(project)
     result: dict[str, Any] = {
         "reused": False,
         "unit_count": len(units),
@@ -503,9 +524,12 @@ def prepare_project(
         "warnings": profile["warnings"],
         "visual": visual_summary,
         "markup_only_unit_ids": markup_only,
+        "image_slivers_removed": slivers_removed,
     }
     if exhibits is not None:
         result["exhibits"] = exhibits
+    if readiness is not None:
+        result["source_readiness"] = readiness
     if rebuild:
         result["preserved"] = {
             "unit_records": carried_records,

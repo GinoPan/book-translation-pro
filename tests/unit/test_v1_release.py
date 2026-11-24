@@ -125,6 +125,34 @@ class V1ContractTests(unittest.TestCase):
             # Without a print stamp there is no page to recognise a running head by.
             self.assertIn("**160** **Lean Accounting**", clean_bilingual_side(root, "**160** **Lean Accounting**"))
 
+    def test_prepare_drops_image_slivers_but_keeps_pictures_text_and_missing_files(self) -> None:
+        from PIL import Image
+
+        from book_translation_pro.figures import drop_image_slivers
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images = root / "assets" / "original" / "images"
+            images.mkdir(parents=True)
+            Image.new("RGB", (12, 40)).save(images / "000001.png")    # a sliver of a drawing
+            Image.new("RGB", (300, 200)).save(images / "000002.jpg")  # a picture
+            text = "\n".join([
+                "Value streams are costed weekly.",
+                "",
+                '<img src="assets\\original/images/000001.png" class="calibre52" /><img src="assets\\original/images/000001.png" />',
+                "",
+                "A sliver inline ![](assets/original/images/000001.png) leaves the words.",
+                "",
+                "![](assets/original/images/000002.jpg)",
+                "",
+                "![](assets/original/images/gone.png)",
+            ])
+            cleaned, removed = drop_image_slivers(root, text)
+            self.assertEqual(removed, 3)
+            self.assertEqual(cleaned.split("\n\n"), [
+                "Value streams are costed weekly.", "A sliver inline  leaves the words.",
+                "![](assets/original/images/000002.jpg)", "![](assets/original/images/gone.png)",
+            ])
+
     def test_bilingual_items_leave_out_comment_only_units_and_stand_in_for_emptied_sources(self) -> None:
         from PIL import Image
 

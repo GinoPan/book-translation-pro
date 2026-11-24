@@ -77,14 +77,14 @@ MODE_DEFAULTS: dict[str, dict[str, Any]] = {
         "visual": {"minimum_review_risk": 3},
     },
     "study": {
-        "execution": {"checkpoints": ["terminology", "visual_exceptions", "exhibits"]},
+        "execution": {"checkpoints": ["terminology", "visual_exceptions", "source_readiness", "exhibits"]},
         "terminology": {"bootstrap_samples": 7, "require_review_before_translation": True},
         "passes": {"edit": True, "visual_qa": True},
         "visual": {"minimum_review_risk": 2},
     },
     "publication": {
         "execution": {
-            "checkpoints": ["terminology", "visual_exceptions", "exhibits", "publication_signoff"]
+            "checkpoints": ["terminology", "visual_exceptions", "source_readiness", "exhibits", "publication_signoff"]
         },
         "terminology": {"bootstrap_samples": 12, "require_review_before_translation": True},
         "passes": {"edit": True, "visual_qa": True},
