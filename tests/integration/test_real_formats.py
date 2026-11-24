@@ -156,15 +156,13 @@ def complete_fake_semantic_work(project: Path) -> None:
 
 def complete_fake_exhibit_review(project: Path, config: dict) -> None:
     """A PDF book waits for the exhibits checkpoint: review every exhibit, record it, approve.
-    The fixtures' exhibit fragments stay as extracted (retrofit runs without --apply)."""
+    prepare wrote the exhibit inventory; the identity "translation" keeps the source labels."""
     if not any(item["checkpoint"] == "exhibits" and item["status"] == "pending"
                for item in load_state(project).get("human_reviews", [])):
         return
     from book_translation_pro.exhibit_review import TEMPLATE, build_exhibit_review, record_exhibit_review
     from book_translation_pro.figure_render import render_project_figures
-    from book_translation_pro.retrofit import retrofit_exhibits
 
-    retrofit_exhibits(project)
     render_project_figures(project, config)
     build_exhibit_review(project, config)
     review = load_json(project / TEMPLATE)

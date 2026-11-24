@@ -77,7 +77,7 @@ def review_items(project: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
     say, and the evidence a recorded verdict is bound to."""
     inventory_path = project / "analysis" / "exhibit-inventory.json"
     if not inventory_path.is_file():
-        raise BTPError("No exhibit inventory: run retrofit-exhibits (a run without --apply is enough) before exhibit-review")
+        raise BTPError("No exhibit inventory: prepare writes it for a Study or Publication PDF book; for a project prepared earlier, run retrofit-exhibits (a run without --apply is enough)")
     inventory = sorted(load_json(inventory_path)["exhibits"], key=lambda e: (e["page"], e["key"], e["part"]))
     report_path = project / RENDER_REPORT
     renders = load_json(report_path).get("renders", {}) if report_path.is_file() else {}
