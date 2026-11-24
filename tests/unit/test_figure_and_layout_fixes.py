@@ -99,6 +99,30 @@ class FigureCropTests(unittest.TestCase):
             self.assertFalse(crop.intersects(page.search_for(kept)[0]), kept)
         document.close()
 
+    def test_drawings_stacked_under_one_caption_are_cropped_together(self) -> None:
+        def page_with(between: str | None = None, own_caption: bool = False) -> tuple[fitz.Document, fitz.Page]:
+            document = fitz.open()
+            page = document.new_page(width=432, height=648)
+            page.draw_rect(fitz.Rect(60, 120, 370, 280), color=(0, 0, 0))   # Type 1
+            page.draw_rect(fitz.Rect(60, 320, 370, 560), color=(0, 0, 0))   # Type 2, 40 pt lower
+            page.insert_text((150, 312), between or "Type 2: Path-Dependent Design", fontsize=8)
+            if own_caption:
+                page.insert_text((60, 112), "Exhibit 1.1 Type 1 Design", fontsize=9)
+            page.insert_text((60, 580), "Exhibit 1.2 System Design Relationships", fontsize=9)
+            return document, page
+
+        document, page = page_with()
+        crop, orientation = _figure_crop_box(page, list(page.search_for("Exhibit 1.2")[0]))
+        self.assertEqual(orientation, "above_caption")
+        self.assertLessEqual(crop.y0, 120)
+        document.close()
+        # Running text between them, or a caption of its own, keeps the far drawing apart.
+        for document, page in (page_with(between="A paragraph of running text set between two figures runs across."),
+                               page_with(own_caption=True)):
+            crop, _orientation = _figure_crop_box(page, list(page.search_for("Exhibit 1.2")[0]))
+            self.assertGreater(crop.y0, 300)
+            document.close()
+
     def test_label_absorption_skips_neighbouring_captions_and_claimed_tables(self) -> None:
         document = fitz.open()
         page = document.new_page(width=432, height=648)

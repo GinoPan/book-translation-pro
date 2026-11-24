@@ -9,7 +9,7 @@ Read this reference for project setup, planning, implementation, or an eventual 
 3. **Initialize** — copy the project template, fingerprint the source, resolve configuration, and create the artifact directories.
 4. **Profile** — identify format, length, language, extractability, sections, assets, scan/OCR status, columns, tables, formulas, and risk. For CHM, record thumbnail-to-full-resolution image promotions and verify that the publication asset directory contains the promoted files.
 5. **Map** — build Book Map in every mode; build Page Map according to source type and mode.
-6. **Terminology/style checkpoint** — build Glossary and Style Guide, render a human review view, and pause if configured.
+6. **Source readiness and terminology/style checkpoints** — check the prepared units (`source_readiness`), build Glossary and Style Guide, render a human review view, and pause if configured.
 7. **Plan work units** — align segments, choose structure-preserving boundaries, compute dependency hashes, and create Context Capsules.
 8. **Translate** — dispatch isolated work units in deterministic batches. Each worker writes only its draft, capsule update, and evidence-backed observations.
 9. **Commit batch** — validate worker outputs, record the dependency state used by the batch, then merge observations through the single writer.
@@ -57,6 +57,18 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
    ```
 
    Every run, with or without `--apply`, rewrites `analysis/exhibit-inventory.json`. On a book whose exhibit review is already recorded, a new run can make that review stale.
+
+   Exhibit text is matched in the units by letter conservation. That also covers large labels the converter turned into headings, labels it set out as a small table, a word cut in two by a font switch, and a caption title set on two lines (`caption_tail`). A paragraph that a figure cut in two is joined back together: running text that starts in lower case on or after the caption line goes back to the unfinished paragraph above the figure, and the moves are listed under `rejoined` in the log. A caption that extraction ran onto the end of a paragraph is put back on its own line first (`captions_split` in the log). Prose that cites an exhibit at the start of a wrapped line ("…presented in / Exhibit 6.13. As can be seen…") is not taken for a caption. Drawings stacked under one caption ("Type 1", "Type 2") are cropped together when only short titles stand between them. Each page of a multi-page diagram gets its own crop (`exhibit-11-6-p2.png`). A picture on a line of its own that shows an exhibit already replaced in the text again (extraction can set a figure's picture pages away from its caption) is removed when it matches the exhibit's crop of the page almost pixel for pixel; each removal is listed under `duplicate_pictures_removed` in the log. After the exhibit step, image slivers (under 32 px on a side) are removed from every unit, and their count is reported as `image_slivers_removed`.
+
+   A rebuilt table can hold several tables set one under another (`sections`), footnotes printed under it (`notes`), and the rows of a following page it runs on to without a caption (`continued`). A table whose part on the next page cannot be rebuilt whole is left `uncertain` rather than spliced in half. Columns stay apart when the PDF prints two amounts as one text run, or sets a total's label across two columns of numbers. Bulleted lists set side by side under plain headings are rebuilt as a table of lists, and a single list of marked items ("FR1—…", "• …", "1. …") as a Markdown list inside the same table markers (`text_list`). A table of text whose rows are numbered down the left edge is rebuilt row by row (each row may run over several lines, and lines in a cell that start at the column's edge become separate items); it can run on to the next page, where the numbering carries on, and the pictures extraction made of each page are all replaced. When the exhibit's last words run on into the paragraph it interrupted, only those words are taken, and the rest goes back to its paragraph.
+
+   In Study and Publication mode, `prepare` ends by writing the source readiness report, `qa/source-readiness.md` with its data in `qa/source-readiness.json`. **Blocking** problems are exhibits left as fragments (`unmatched`), exhibits no rule recognised (`uncertain`), tables not rebuilt (`needs_hand_rebuild`), and captions in another unit than their picture. **To review** are pictures kept in English, totals that disagree with their rows (a possible source misprint), print stamps, and image slivers. Units left with no text are counted (`empty_units`); prepare carries them through unchanged. Fix what can be fixed in the source units, rerun `BTP source-readiness <project-dir>`, and show the report to the user. After their approval:
+
+   ```text
+   BTP record <project-dir> --kind review --checkpoint source_readiness --approve --reviewer <name> [--notes "<why the remaining blocking problems are accepted>"]
+   ```
+
+   `plan` dispatches no translation while this checkpoint is pending. The approval binds the units' source hashes, so a unit changed afterwards makes it stale until the report is rerun and approved again. A project prepared before this gate existed gets it as `not_required` when its configuration is refreshed.
 
 4. For PDF, inspect every page listed in `analysis/visual-summary.json.required_review_pages`:
 
@@ -160,6 +172,7 @@ It produces:
 - `preflight`: before extraction or rendering when dependencies are missing or the source is high risk.
 - `terminology`: before bulk translation when configured; default on for Study and Publication.
 - `visual-exceptions`: when reading order or OCR confidence is below the mode threshold.
+- `source_readiness`: after `prepare`, before any translation; default on for Study and Publication.
 - `publication-signoff`: required before Publication is marked complete.
 
 ## Resume

@@ -79,6 +79,37 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(sorted(label["text"] for label in exhibit["labels"]),
                              ["Customer Needs", "Feedback", "Strategy Changes"])
 
+    def test_a_caption_title_on_two_lines_keeps_its_second_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "book.pdf"
+            _diagram_pdf(pdf)
+            document = fitz.open(pdf)
+            document[0].insert_text((72, 291), "of the Business", fontname="hebo", fontsize=9)
+            document.saveIncr()
+            document.close()
+            (exhibit,) = build_inventory(pdf)["exhibits"]
+            self.assertEqual(exhibit["caption"], "EXHIBIT 1.1 Planning Loop")
+            self.assertEqual(exhibit["caption_tail"], "of the Business")
+            self.assertNotIn("of the Business", [label["text"] for label in exhibit["labels"]])
+            # A caption on one line has no second line.
+            _diagram_pdf(pdf)
+            (exhibit,) = build_inventory(pdf)["exhibits"]
+            self.assertNotIn("caption_tail", exhibit)
+
+    def test_prose_citing_an_exhibit_at_the_start_of_a_line_is_not_a_caption(self) -> None:
+        from book_translation_pro.exhibits import _captions
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 100), "The basic structure of the planning loop is presented in", fontname="tiro", fontsize=11)
+        page.insert_text((72, 114), "Exhibit 1.1. As can be seen, it starts", fontname="tiro", fontsize=11)
+        # A real caption right under an unfinished line, but in its own face.
+        page.insert_text((72, 200), "The figure below shows the loop as it runs in the", fontname="tiro", fontsize=11)
+        page.insert_text((72, 212), "EXHIBIT 1.2 Planning Loop", fontname="hebo", fontsize=9)
+        # A label of the figure, narrower than the caption under it, is not running text.
+        page.insert_text((72, 300), "Feedback", fontname="hebo", fontsize=9)
+        page.insert_text((72, 310), "EXHIBIT 1.3 Planning Loop", fontname="hebo", fontsize=9)
+        self.assertEqual([caption["key"] for caption in _captions(page)], ["1.2", "1.3"])
+
     def test_a_title_set_larger_than_the_body_is_a_label_but_body_text_is_not(self) -> None:
         from book_translation_pro.exhibits import label_lines
         document = fitz.open()
@@ -750,6 +781,181 @@ class RetrofitTests(unittest.TestCase):
                       '<!-- btp:figure-labels exhibit="1.1" -->\n', text)
         self.assertIn("<!-- /btp:figure-labels -->\n\n**EXHIBIT 1.1** **Planning Loop**\n\n" + PROSE_AFTER, text)
 
+    def test_headings_and_a_table_made_of_whole_labels_are_fragments(self) -> None:
+        # Large labels came out as headings, side-by-side ones as a converter table;
+        # one heading even became a unit of its own.
+        units = _units("\n\n".join([PROSE_BEFORE, "**Customer Needs**", "|  |  |\n|---|---|\n|  | Feedback |"]) + "\n",
+                       "### Strategy Changes\n", "**EXHIBIT 1.1** **Planning Loop**\n\n" + PROSE_AFTER + "\n")
+        (decision,) = self._plan(units)
+        self.assertEqual((decision["status"], decision["coverage"]), ("replace", 1.0))
+        rewritten = rewrite_units(units, [decision])
+        self.assertIn(PROSE_BEFORE, rewritten[0])
+        self.assertNotIn("Feedback |", rewritten[0])
+        self.assertEqual(rewritten[1].strip(), "")
+        # A heading that is not a label is the book's own: the walk stops there.
+        units = _units("\n\n".join([PROSE_BEFORE, "**Customer Needs** **Feedback**"]) + "\n",
+                       "### Strategy Review\n", "**EXHIBIT 1.1** **Planning Loop**\n")
+        (decision,) = self._plan(units)
+        self.assertEqual(decision["status"], "unmatched")
+
+    def test_the_caption_second_line_stays_with_the_caption(self) -> None:
+        # "Changes" could pass for a label, so before this it was taken as a fragment
+        # and the extracted image beside the caption was never used.
+        exhibit = dict(DIAGRAM, caption="EXHIBIT 1.1 Planning Loop and", caption_tail="Changes")
+        image = '<img src="assets\\original/images/000000.png" class="calibre2" />'
+        units = _units("\n\n".join([PROSE_BEFORE, image, "**EXHIBIT 1.1 Planning Loop and**", "**Changes**",
+                                    PROSE_AFTER]) + "\n")
+        (decision,) = self._plan(units, exhibit)
+        self.assertEqual(decision["status"], "replace")
+        text = rewrite_units(units, [decision])[0]
+        self.assertIn("**EXHIBIT 1.1 Planning Loop and**\n\n**Changes**\n\n" + PROSE_AFTER, text)
+        self.assertNotIn("000000.png", text)
+
+    def test_a_word_cut_by_a_font_switch_is_matched_by_its_letters(self) -> None:
+        cut = "Custo **mer** Needs **Strategy** Changes **Feedback**"
+        units = _units("\n\n".join([PROSE_BEFORE, cut, "**EXHIBIT 1.1** **Planning Loop**"]) + "\n")
+        (decision,) = self._plan(units)
+        self.assertEqual((decision["status"], decision["coverage"]), ("replace", 1.0))
+        # The same pieces with no font switch read as words the exhibit does not have.
+        units = _units("\n\n".join([PROSE_BEFORE, "Custo mer Needs Strategy Changes Feedback",
+                                    "**EXHIBIT 1.1** **Planning Loop**"]) + "\n")
+        (decision,) = self._plan(units)
+        self.assertEqual(decision["status"], "unmatched")
+
+    def test_running_text_glued_to_a_caption_goes_back_to_its_paragraph(self) -> None:
+        from book_translation_pro.retrofit import rejoin_caption_text
+        head = "A figure set inside a paragraph splits the sentence it interrupts, and the rest of the sen-"
+        lines = [[head, "", "![](assets/original/images/exhibit-1-1.png)"],
+                 ["**EXHIBIT 1.1** **Planning Loop** tence comes after the caption.", "", PROSE_AFTER]]
+        changed, log = rejoin_caption_text(lines, [DIAGRAM])
+        self.assertEqual(changed, {0, 1})
+        self.assertEqual(lines[0][0], head[:-1] + "tence comes after the caption.")
+        self.assertEqual(lines[1][0], "**EXHIBIT 1.1** **Planning Loop**")
+        self.assertTrue(log[0]["rejoined"])
+        # A paragraph that ends its sentence is complete: the text stays where it is.
+        lines = [[PROSE_BEFORE], ["**EXHIBIT 1.1** **Planning Loop** comes after the caption."]]
+        changed, log = rejoin_caption_text(lines, [DIAGRAM])
+        self.assertEqual((changed, log[0]["rejoined"]), (set(), False))
+        self.assertEqual(lines[1][0], "**EXHIBIT 1.1** **Planning Loop** comes after the caption.")
+        # Text starting a new sentence after the caption is not a continuation.
+        lines = [[head], ["**EXHIBIT 1.1** **Planning Loop** The next paragraph starts here."]]
+        self.assertEqual(rejoin_caption_text(lines, [DIAGRAM]), (set(), []))
+        # The rest of the paragraph after the caption (and its label block) comes back too,
+        # after what was on the caption's line, as long as the sentence is still open.
+        lines = [[head, "", "**EXHIBIT 1.1** **Planning Loop** tence goes on past the",
+                  "", "![](assets/original/images/exhibit-1-1.png)", "", '<!-- btp:figure-labels exhibit="1.1" -->',
+                  "1. Customer Needs", "<!-- /btp:figure-labels -->", "", "caption and ends here.", "", PROSE_AFTER]]
+        changed, _log = rejoin_caption_text(lines, [DIAGRAM])
+        self.assertEqual(lines[0][0], head[:-1] + "tence goes on past the caption and ends here.")
+        self.assertEqual(lines[0][2], "**EXHIBIT 1.1** **Planning Loop**")
+        self.assertEqual(lines[0][10], "")
+        self.assertEqual(lines[0][12], PROSE_AFTER)
+        # A paragraph after the caption that starts a sentence stays.
+        lines = [[head, "", "**EXHIBIT 1.1** **Planning Loop**", "", PROSE_AFTER]]
+        self.assertEqual(rejoin_caption_text(lines, [DIAGRAM]), (set(), []))
+
+    def test_a_caption_glued_to_the_end_of_a_paragraph_gets_its_own_line(self) -> None:
+        from book_translation_pro.retrofit import split_glued_captions
+        head = "Caspian is considering bringing these outside processing"
+        units = _units(f"{head} **EXHIBIT 1.1** **Planning Loop**\n\nactivities in-house.\n")
+        log = split_glued_captions(units, [DIAGRAM])
+        self.assertEqual(units[0]["lines"][:3], [head, "", "**EXHIBIT 1.1** **Planning Loop**"])
+        self.assertEqual(units[0]["text"], "\n".join(units[0]["lines"]))
+        self.assertEqual([item["exhibit"] for item in log], ["1.1"])
+        # Left alone: a bold cross-reference in prose case, bold that is not the caption,
+        # a caption already on its own line, and a caption with text after it.
+        kept = ["See the loop in **Exhibit 1.1 Planning Loop**",
+                "The loop has a **Planning Loop** step",
+                "**EXHIBIT 1.1** **Planning Loop**",
+                "It runs **EXHIBIT 1.1** **Planning Loop** again"]
+        units = _units("\n\n".join(kept) + "\n")
+        self.assertEqual(split_glued_captions(units, [DIAGRAM]), [])
+        self.assertEqual(units[0]["text"], "\n\n".join(kept) + "\n")
+
+    def test_a_list_exhibit_whose_last_line_runs_into_the_paragraph(self) -> None:
+        from collections import Counter
+
+        from book_translation_pro.retrofit import WORD_RE, _last_words, _letters, rejoin_caption_text
+        items = ["FR1—Produce the quantity every interval.", "FR2—Provide a safe working environment."]
+        exhibit = {"key": "11.10", "label": "EXHIBIT", "part": 1, "parts": 1, "page": 3, "classification": "text_list",
+                   "orientation": "below_caption", "caption": "EXHIBIT 11.10 The Requirements", "reason": "list",
+                   "table": {"mode": "list", "header": None, "meta": [], "rows": [[item] for item in items],
+                             "numeric_columns": [], "continues": False}}
+        head = "The people who operate their piece of the system in"
+        units = _units("\n\n".join([head, "**EXHIBIT 11.10 The Requirements**", items[0],
+                                    f"{items[1]} the plants. These customers work there."]) + "\n")
+        (decision,) = self._plan(units, exhibit)
+        self.assertEqual(decision["status"], "replace")
+        self.assertEqual(decision["remove"][-1]["keeps"], ["the plants. These customers work there."])
+        lines = [rewrite_units(units, [decision])[0].split("\n")]
+        self.assertIn("- FR2—Provide a safe working environment.", lines[0])
+        rejoin_caption_text(lines, [exhibit])
+        self.assertEqual(lines[0][0], head + " the plants. These customers work there.")
+        # The last words are taken only when they use up the exhibit exactly and the
+        # rest goes on in lower case.
+        pool, words = _letters(items[1]), Counter(w.casefold() for w in WORD_RE.findall(items[1]))
+        line = f"{items[1]} the plants."
+        self.assertEqual(_last_words(line, pool, words), (items[1], "the plants."))
+        self.assertIsNone(_last_words(f"{items[1]} The plants.", pool, words))
+        self.assertIsNone(_last_words(f"FR2—Provide a safe the plants.", pool, words))
+        self.assertIsNone(_last_words(f"{items[1]} *the* plants.", pool, words))
+
+    def test_a_table_pictured_page_by_page_replaces_every_page_picture(self) -> None:
+        exhibit = {"key": "10.4", "label": "EXHIBIT", "part": 1, "parts": 1, "page": 3, "classification": "table_grid",
+                   "orientation": "below_caption", "caption": "EXHIBIT 10.4 Integrating Risks", "reason": "rows",
+                   "continued": [{"page": 4, "region": [0, 0, 1, 1]}],
+                   "table": {"mode": "grid", "header": ["", "Risks"], "meta": [], "rows": [["1", "Lost orders"], ["2", "Late orders"]],
+                             "numeric_columns": [0], "continues": False}}
+        pages = ['<img src="p287.png" />', '<img src="p288.png" />']
+        units = _units("\n\n".join(["**EXHIBIT 10.4 Integrating Risks**", *pages, PROSE_AFTER]) + "\n")
+        (decision,) = self._plan(units, exhibit)
+        self.assertEqual(decision["status"], "replace")
+        self.assertEqual([item["text"] for item in decision["remove"]], pages)
+        # A picture set right above another caption is that exhibit's, not a further page.
+        units = _units("\n\n".join(["**EXHIBIT 10.4 Integrating Risks**", *pages, "**EXHIBIT 10.5 Next**"]) + "\n")
+        (decision,) = self._plan(units, exhibit)
+        self.assertEqual([item["text"] for item in decision["remove"]], pages[:1])
+
+    def test_a_stray_picture_of_a_replaced_exhibit_is_removed(self) -> None:
+        from book_translation_pro.retrofit import drop_duplicate_pictures
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            document = fitz.open()
+            page = document.new_page()
+            for n in range(6):
+                page.draw_rect(fitz.Rect(80 + 40 * n, 120, 110 + 40 * n, 200 + 20 * n), color=(0, 0, 0), fill=(0.2 * (n % 3), 0.5, 0.8))
+            page.insert_text((90, 330), "Process Flow", fontsize=12)
+            crop = fitz.Rect(70, 110, 340, 340)
+            images = project / "assets" / "original" / "images"
+            images.mkdir(parents=True)
+            page.get_pixmap(dpi=150, clip=crop).save(images / "002940.png")       # the exhibit again
+            page.get_pixmap(dpi=150, clip=fitz.Rect(70, 110, 200, 340)).save(images / "000026.png")  # part of it only
+            page.get_pixmap(dpi=150, clip=fitz.Rect(70, 250, 340, 480)).save(images / "003651.png")  # same shape, other content
+            page.get_pixmap(dpi=150, clip=crop).save(images / "exhibit-10-3.png")  # the exhibit's own crop
+            document.save(project / "book.pdf")
+            document.close()
+            inventory = {"exhibits": [{"key": "10.3", "part": 1, "page": 1, "crop": list(crop)}]}
+            decisions = [{"key": "10.3", "part": 1, "page": 1, "status": "replace"}]
+            lines = [["![](assets/original/images/exhibit-10-3.png)", "", '<img src="assets\\original/images/002940.png" />',
+                      "", "![](assets/original/images/000026.png)", "", "See ![](assets/original/images/002940.png) here",
+                      "", "![](assets/original/images/003651.png)"]]
+            removed = drop_duplicate_pictures(project, project / "book.pdf", lines, inventory, decisions)
+            self.assertEqual([(item["picture"], item["exhibit"]) for item in removed],
+                             [("assets/original/images/002940.png", "10.3")])
+            self.assertEqual(lines[0][2], "")
+            self.assertEqual([lines[0][0], lines[0][4], lines[0][6], lines[0][8]],
+                             ["![](assets/original/images/exhibit-10-3.png)", "![](assets/original/images/000026.png)",
+                              "See ![](assets/original/images/002940.png) here", "![](assets/original/images/003651.png)"])
+            # An exhibit left untouched (a picture kept as printed) is never matched.
+            lines = [['<img src="assets\\original/images/002940.png" />']]
+            self.assertEqual(drop_duplicate_pictures(project, project / "book.pdf", lines, inventory,
+                                                     [dict(decisions[0], status="untouched")]), [])
+
+    def test_each_page_of_a_diagram_has_its_own_crop(self) -> None:
+        from book_translation_pro.retrofit import crop_asset_name
+        self.assertEqual(crop_asset_name({"key": "11.6", "part": 1}), "exhibit-11-6.png")
+        self.assertEqual(crop_asset_name({"key": "11.6", "part": 2}), "exhibit-11-6-p2.png")
+
     def test_the_extracted_image_is_replaced_where_extraction_put_it(self) -> None:
         caption = "**EXHIBIT 1.1** **Planning Loop**"
         # Printed above its caption, extracted below it: the block takes the image's place.
@@ -901,6 +1107,347 @@ class PrepareHookTests(unittest.TestCase):
             self.assertFalse((project / "analysis" / "exhibit-inventory.json").exists())
             text = (project / "source-work" / "work-units" / "unit-0001.md").read_text(encoding="utf-8")
             self.assertNotIn("btp:figure-labels", text)
+
+
+def _text(page: fitz.Page, x: float, y: float, text: str, font: str = "helv", size: float = 8, **kw) -> None:
+    page.insert_text((x, y), text, fontname=font, fontsize=size, **kw)
+
+
+def _rows(page: fitz.Page, top: float, rows: list[tuple[str, ...]], xs: tuple[float, ...], pitch: float = 11) -> None:
+    for n, row in enumerate(rows):
+        for x, cell in zip(xs, row):
+            if cell:
+                _text(page, x, top + pitch * n, cell)
+
+
+class TableRebuildTests(unittest.TestCase):
+    """Tables as books set them: stacked under one caption, run on to the next page,
+    with footnotes, group labels up the side, and labels wrapped onto the value line."""
+
+    def _inventory(self, build) -> list[dict]:
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "book.pdf"
+            document = fitz.open()
+            build(document)
+            document.save(pdf)
+            document.close()
+            inventory = build_inventory(pdf)
+            validate_schema(inventory, "exhibit-inventory.schema.json")
+            return inventory["exhibits"]
+
+    def test_number_rules(self) -> None:
+        from book_translation_pro.exhibits import numeric, quantity
+        self.assertTrue(numeric("(3,000)"))
+        self.assertTrue(numeric("$(5,061.07)"))
+        self.assertFalse(numeric("100%)"))          # the end of a heading "Total (Must equal 100%)"
+        self.assertTrue(quantity("4–6 weeks"))
+        self.assertTrue(quantity("$30 million"))
+        self.assertTrue(quantity("2 hours–2 days"))
+        self.assertFalse(quantity("Month 1"))        # a heading
+        self.assertFalse(quantity("5-Feb"))          # a date heading
+
+    def test_tables_set_one_under_another_are_each_rebuilt(self) -> None:
+        def build(document: fitz.Document) -> None:
+            page = document.new_page()
+            _body(page, 60)
+            _text(page, 72, 160, "EXHIBIT 7.12 Valuing Inventory", font="hebo", size=9)
+            _rows(page, 176, [("", "Days", "Total Cost"), ("", "20", "$849,526")], (80, 170, 240))
+            _rows(page, 210, [("", "Days", "Value"), ("Raw material", "10", "$424,763"),
+                              ("Finished goods", "4", "$169,905"), ("TOTAL", "14", "$594,668")], (80, 170, 240))
+            _body(page, 300)
+
+        (exhibit,) = self._inventory(build)
+        self.assertEqual(exhibit["classification"], "table_grid")
+        table = exhibit["table"]
+        self.assertEqual(table["meta"], [])            # the first table is not flattened into text
+        self.assertEqual(table["rows"], [["20", "$849,526"]])
+        (second,) = table["sections"]
+        self.assertEqual(second["header"], ["", "Days", "Value"])
+        self.assertEqual(second["rows"][-1], ["TOTAL", "14", "$594,668"])
+        self.assertEqual({t["column"]: t["verdict"] for t in exhibit["checks"]["totals"]}, {"Days": "exact", "Value": "exact"})
+        self.assertEqual(exhibit["checks"]["characters_missing"], "")
+
+    def _running_on(self, second_page) -> list[dict]:
+        def build(document: fitz.Document) -> None:
+            page = document.new_page()
+            _body(page, 60, lines=20)
+            # The table reaches the foot of the page (below three quarters of its height).
+            _text(page, 72, 470, "EXHIBIT 9.5 Forecast", font="hebo", size=9)
+            _rows(page, 486, [("", "Month 1", "Month 2")] + [(f"Product {c}", str(10 * n), str(20 * n))
+                                                              for n, c in enumerate("ABCDEFGHIJKLMNOPQRS", 1)],
+                  (80, 220, 300))
+            second_page(document.new_page())
+
+        return self._inventory(build)
+
+    def test_a_table_runs_on_to_the_next_page(self) -> None:
+        def second(page: fitz.Page) -> None:
+            _rows(page, 100, [("Variable Margin", "5", "6"), ("Operating Expenses", "100", "100"),
+                              ("Profit", "-95", "-94")], (80, 220, 300))
+            _body(page, 160)
+
+        (exhibit,) = self._running_on(second)
+        self.assertEqual(exhibit["classification"], "table_grid")
+        self.assertEqual([c["page"] for c in exhibit["continued"]], [2])
+        (more,) = exhibit["table"]["sections"]
+        self.assertEqual(more["rows"][0], ["Variable Margin", "5", "6"])
+        self.assertEqual(more["rows"][-1], ["Profit", "-95", "-94"])
+        self.assertEqual(exhibit["checks"]["characters_missing"], "")
+
+    def test_body_text_on_the_next_page_is_not_a_continuation(self) -> None:
+        (exhibit,) = self._running_on(lambda page: _body(page, 100))
+        self.assertEqual(exhibit["classification"], "table_grid")
+        self.assertNotIn("continued", exhibit)
+        self.assertNotIn("sections", exhibit["table"])
+
+    def test_a_continuation_that_cannot_be_rebuilt_whole_leaves_the_exhibit_uncertain(self) -> None:
+        def second(page: fitz.Page) -> None:
+            # Rows whose label and value touch: no column can be told apart.
+            for n, label in enumerate(("Variable Margin", "Operating Expenses", "Profit")):
+                y = 100 + 11 * n
+                _text(page, 80, y, label)
+                _text(page, 80 + fitz.get_text_length(label, "helv", 8) + 0.5, y, str(5 + n), font="hebo")
+            _body(page, 160)
+
+        (exhibit,) = self._running_on(second)
+        self.assertEqual(exhibit["classification"], "uncertain")
+        self.assertIn("runs on to page 2", exhibit["reason"])
+        self.assertNotIn("table", exhibit)
+
+    def test_quantities_footnote_and_a_sentence_above_the_table(self) -> None:
+        def build(document: fitz.Document) -> None:
+            page = document.new_page()
+            _body(page, 60)
+            _text(page, 72, 160, "EXHIBIT 3.1 Before and After", font="hebo", size=9)
+            _text(page, 80, 174, "For each measure please compare the figures before lean with the figures after lean in the")
+            _text(page, 80, 184, "plants.")
+            _rows(page, 198, [("", "Before", "After"), ("Throughput time", "4-6 weeks", "2 hours-2 days"),
+                              ("Gross profit", "38%", "51%"), ("Working capital*", "21.8%", "6.7%")], (80, 230, 300))
+            _text(page, 80, 250, "* W/C = A/R + Inv - Trade Payables")
+            _body(page, 290)
+
+        (exhibit,) = self._inventory(build)
+        table = exhibit["table"]
+        self.assertEqual(table["meta"], [["For each measure please compare the figures before lean with the figures "
+                                          "after lean in the"], ["plants."]])
+        self.assertEqual(table["header"], ["", "Before", "After"])
+        self.assertEqual(table["rows"][0], ["Throughput time", "4-6 weeks", "2 hours-2 days"])
+        self.assertEqual(table["notes"], ["* W/C = A/R + Inv - Trade Payables"])
+        self.assertEqual(exhibit["checks"]["characters_missing"], "")
+
+    def test_group_labels_up_the_side_name_their_block_of_rows(self) -> None:
+        def build(document: fitz.Document) -> None:
+            page = document.new_page()
+            _body(page, 60)
+            _text(page, 72, 160, "EXHIBIT 7.5 Box Score", font="hebo", size=9)
+            _rows(page, 176, [("", "Week 1", "Week 2"), ("Units per person", "31.77", "30.46"),
+                              ("On-time shipment", "96.2%", "98.2%")], (100, 230, 300))
+            _rows(page, 216, [("Revenue", "$366,487", "$321,499"), ("Inventory", "$310,622", "$295,712")],
+                  (100, 230, 300))
+            _text(page, 92, 208, "OPS", rotate=90)       # beside the first block, reading up
+            _text(page, 92, 230, "MONEY", rotate=90)     # beside the second block
+            _text(page, 82, 230, "57", rotate=90)        # a page number up the edge: not a label
+            _body(page, 300)
+
+        (exhibit,) = self._inventory(build)
+        rows = exhibit["table"]["rows"]
+        self.assertEqual([row[0] for row in rows], ["OPS", "", "MONEY", ""])
+        self.assertEqual(rows[2][1:], ["Revenue", "$366,487", "$321,499"])
+        self.assertNotIn("57", [cell for row in rows for cell in row])
+
+    def test_a_label_wrapped_onto_its_value_line_and_a_totals_word_left_of_its_column(self) -> None:
+        def build(document: fitz.Document) -> None:
+            page = document.new_page()
+            _body(page, 60)
+            _text(page, 72, 160, "EXHIBIT 6.7 Process Costs", font="hebo", size=9)
+            _rows(page, 176, [("Code", "Description", "Cost"), ("1", "Plan the work", "$100"),
+                              ("2", "Manage legal, military, and academic", ""),
+                              ("", "records and relationships", "$200")], (80, 120, 320))
+            _text(page, 100, 220, "TOTALS")
+            _text(page, 320, 220, "$300")
+            _body(page, 300)
+
+        (exhibit,) = self._inventory(build)
+        table = exhibit["table"]
+        self.assertEqual(table["header"], ["Code", "Description", "Cost"])
+        self.assertEqual(table["rows"], [["1", "Plan the work", "$100"],
+                                         ["2", "Manage legal, military, and academic records and relationships", "$200"],
+                                         ["", "TOTALS", "$300"]])
+        self.assertEqual([t["verdict"] for t in exhibit["checks"]["totals"]], ["exact"])
+
+    def test_numbers_printed_as_one_span_and_labels_across_columns_keep_the_columns_apart(self) -> None:
+        def build(document: fitz.Document) -> None:
+            page = document.new_page()
+            _body(page, 60)
+            _text(page, 72, 150, "EXHIBIT 7.4 Plant-wide Income", font="hebo", size=9)
+            _text(page, 160, 166, "VALUE STREAMS")  # a heading over several columns
+            _rows(page, 176, [("", "Motors", "Design", "Support", "TOTAL"), ("Sales", "$326", "$87", "$12", "$425"),
+                              ("Costs", "$111", "$203", "$37", "$351")], (72, 150, 210, 270, 350))
+            # Two amounts a column apart, printed as one span.
+            _text(page, 72, 209, "Profit")
+            _text(page, 150, 209, "$215")
+            _text(page, 210, 209, "($116)" + " " * 18 + "($25)")
+            _text(page, 350, 209, "$74")
+            # A total's label set across the two value-stream columns, beside its value.
+            _text(page, 225, 220, "Opening inventory")
+            _text(page, 350, 220, "$925")
+            _body(page, 300)
+
+        (exhibit,) = self._inventory(build)
+        self.assertEqual(exhibit["classification"], "table_grid")
+        self.assertEqual(exhibit["checks"]["merged_cells"], [])
+        self.assertEqual(exhibit["table"]["header"], ["", "Motors", "Design", "Support", "TOTAL"])
+        rows = exhibit["table"]["rows"]
+        self.assertEqual(rows[2], ["Profit", "$215", "($116)", "($25)", "$74"])
+        self.assertEqual(rows[3][-1], "$925")
+        self.assertIn("Opening inventory", rows[3])
+
+    def _unicode_font(self) -> str:
+        """A font with "•" and "—" (the base-14 fonts print them as "·")."""
+        try:
+            return figure_render.font_files()[0]
+        except BTPError:
+            self.skipTest("no CJK font installed")
+
+    def test_a_list_of_marked_items_is_rebuilt_as_a_list(self) -> None:
+        fontfile = self._unicode_font()
+
+        def build(document: fitz.Document, stray: bool = False) -> None:
+            page = document.new_page()
+            page.insert_font(fontname="uni", fontfile=fontfile)
+            _body(page, 60)
+            _text(page, 72, 160, "EXHIBIT 11.10 The Six Requirements", font="hebo", size=9)
+            _text(page, 72, 176, "FR1—Produce the quantity every interval.", font="uni")
+            _text(page, 72, 187, "FR2—Achieve FR1 in spite of internal and external", font="uni")
+            _text(page, 90, 198, "variation.", font="uni")                   # wrapped under its text
+            _text(page, 72, 209, "FR3—Provide a safe working environment.", font="uni")
+            if stray:
+                _text(page, 40, 220, "A line set left of the items", font="uni")
+            _body(page, 300)
+
+        (exhibit,) = self._inventory(build)
+        self.assertEqual(exhibit["classification"], "text_list")
+        self.assertEqual([row[0] for row in exhibit["table"]["rows"]],
+                         ["FR1—Produce the quantity every interval.",
+                          "FR2—Achieve FR1 in spite of internal and external variation.",
+                          "FR3—Provide a safe working environment."])
+        # A line that is neither an item nor wrapped under one: no list.
+        (exhibit,) = self._inventory(lambda document: build(document, stray=True) or None)
+        self.assertNotEqual(exhibit["classification"], "text_list")
+
+    def test_bulleted_lists_side_by_side_under_plain_headings(self) -> None:
+        fontfile = self._unicode_font()
+
+        def build(document: fitz.Document, bullet: str = "•") -> None:
+            page = document.new_page()
+            page.insert_font(fontname="uni", fontfile=fontfile)
+            _body(page, 60)
+            _text(page, 72, 160, "EXHIBIT 8.3A Cultural Comparisons", font="hebo", size=9)
+            _text(page, 90, 176, "Business as Usual")    # headings in the body face, centred over their lists
+            _text(page, 290, 176, "Lean")
+            for n, row in enumerate([("•", "Shareholder perspective", bullet, "Stakeholder perspective"),
+                                     ("•", "Competing individuals:", bullet, "Cooperating teams:"),
+                                     ("", "Market forces", "", "Shared goals")]):
+                for x, cell in zip((72, 82, 260, 270), row):
+                    if cell:
+                        _text(page, x, 187 + 11 * n, cell, font="uni")
+            _body(page, 300)
+
+        (exhibit,) = self._inventory(build)
+        self.assertEqual(exhibit["classification"], "table_lists")
+        self.assertEqual(exhibit["table"]["header"], ["Business as Usual", "Lean"])
+        self.assertEqual(exhibit["table"]["items"],
+                         [["• Shareholder perspective", "• Competing individuals: Market forces"],
+                          ["• Stakeholder perspective", "• Cooperating teams: Shared goals"]])
+        # A column with no bullets has no items to hang its lines on: no list table.
+        (exhibit,) = self._inventory(lambda document: build(document, bullet="") or None)
+        self.assertNotEqual(exhibit["classification"], "table_lists")
+
+    def test_a_text_table_with_numbered_rows_runs_on_to_the_next_page(self) -> None:
+        def build(document: fitz.Document, second: str = "2") -> None:
+            page = document.new_page()               # 842 high: the table reaches its foot
+            _body(page, 60)
+            _text(page, 72, 600, "EXHIBIT 10.4 Integrating Risks", font="hebo", size=9)
+            _rows(page, 616, [("", "Risks", "Ref", "Activities")], (60, 80, 230, 280))
+            lines = [(630, "1", "Out-of-date price", "p. 80", "Monthly PO audit"),
+                     (640, "", "  information", "", "  over $1,000"),
+                     (650, "", "-pay the right price", "", "Spending controls"),
+                     (665, second, "Purchase orders lost", "p. 82", "AP compares"),
+                     (675, "", "-record the POs", "", "  against PO file")]
+            for y, number, risk, ref, activity in lines:
+                for x, cell in ((60, number), (80, risk), (230, ref), (280, activity)):
+                    if cell.strip():
+                        _text(page, x + (9 if cell.startswith("  ") else 0), y, cell.strip())
+            page = document.new_page()
+            for y, number, risk, ref, activity in [(100, "", "", "", "Std work review"),
+                                                   (115, "3", "Inadequate policies", "p. 82", "Yearly review"),
+                                                   (125, "", "  to prevent use", "", ""),
+                                                   (140, "", "Other Risks Not Included", "", ""),
+                                                   (155, "", "Poor communication", "p. 79", ""),
+                                                   (165, "", "  of needs", "", "")]:
+                for x, cell in ((60, number), (80, risk), (230, ref), (280, activity)):
+                    if cell.strip():
+                        _text(page, x + (9 if cell.startswith("  ") else 0), y, cell.strip())
+            _body(page, 300)
+
+        (exhibit,) = self._inventory(build)
+        self.assertEqual(exhibit["classification"], "table_grid")
+        self.assertEqual([c["page"] for c in exhibit["continued"]], [2])
+        self.assertEqual(exhibit["table"]["header"], ["", "Risks", "Ref", "Activities"])
+        self.assertEqual(exhibit["table"]["rows"], [
+            ["1", "Out-of-date price information<br>-pay the right price", "p. 80", "Monthly PO audit over $1,000<br>Spending controls"],
+            ["2", "Purchase orders lost<br>-record the POs", "p. 82", "AP compares against PO file<br>Std work review"],
+            ["3", "Inadequate policies to prevent use", "p. 82", "Yearly review"],
+            ["", "Other Risks Not Included", "", ""],
+            ["", "Poor communication of needs", "p. 79", ""]])
+        # Numbers out of sequence: not a numbered table.
+        (exhibit,) = self._inventory(lambda document: build(document, second="5") or None)
+        self.assertEqual(exhibit["classification"], "uncertain")
+
+    def test_numbers_with_words_between_them_are_not_merged_columns(self) -> None:
+        from book_translation_pro.exhibits import merged_cells
+        self.assertEqual(merged_cells([["Network Phases 1 and 2", "Steps 9 and 10<br>$87,909"]]), [])
+        self.assertEqual(merged_cells([["$87,909 $12,764", "x<br>(364) (57)"]]), ["$87,909 $12,764", "x<br>(364) (57)"])
+
+    def test_only_numbers_a_column_gap_apart_split_a_span(self) -> None:
+        from book_translation_pro.exhibits import _numbers_apart
+
+        def chars(*words: tuple[str, float]) -> list[dict]:
+            out = []
+            for word, x in words:
+                for n, c in enumerate(word):
+                    out.append({"c": c, "bbox": (x + 4 * n, 0, x + 4 * n + 4, 8)})
+                out.append({"c": " ", "bbox": (x + 4 * len(word), 0, x + 4 * len(word) + 2, 8)})
+            return out[:-1]
+        self.assertEqual(len(_numbers_apart(chars(("$87", 0), ("$12", 40)), 8)), 2)
+        self.assertIsNone(_numbers_apart(chars(("$87", 0), ("$12", 14)), 8))       # a word space apart
+        self.assertIsNone(_numbers_apart(chars(("Total", 0), ("$12", 60)), 8))     # a word is no number
+        self.assertIsNone(_numbers_apart(chars(("$87", 0),), 8))
+
+    def test_untitled_columns_fold_only_into_a_complementary_neighbour(self) -> None:
+        from book_translation_pro.exhibits import _merge_complementary
+        self.assertEqual(_merge_complementary(["", "Activity", "Cost"], [["N/A", "", "0%"], ["", "Register", "50%"]]),
+                         (["Activity", "Cost"], [["N/A", "0%"], ["Register", "50%"]]))
+        # A row-label column filled beside the titled one in the same rows stays apart.
+        rows = [["Revenue", "x", "1"], ["Costs", "y", "2"]]
+        self.assertEqual(_merge_complementary(["", "Note", "Cost"], rows), (["", "Note", "Cost"], rows))
+        # So does an untitled column of numbers.
+        rows = [["46.00%", "", "Hurdle"], ["", "a", "b"]]
+        self.assertEqual(_merge_complementary(["", "Label", "Week"], rows), (["", "Label", "Week"], rows))
+
+    def test_sections_and_footnotes_reach_the_source_unit(self) -> None:
+        from book_translation_pro.retrofit import _block, _exhibit_texts
+        exhibit = {"key": "7.12", "classification": "table_grid", "table": {
+            "mode": "grid", "header": ["Days", "Cost"], "meta": [], "rows": [["20", "$849,526"]],
+            "numeric_columns": [0, 1], "continues": False, "notes": ["* At month end"],
+            "sections": [{"header": ["", "Value"], "meta": [], "rows": [["Raw material", "$424,763"]],
+                          "numeric_columns": [1]}]}}
+        text = "\n".join(_block(exhibit))
+        self.assertEqual(text.count("|---|"), 2)
+        self.assertIn("| Raw material | \\$424,763 |", text)
+        self.assertIn("\n\\* At month end\n", text)
+        self.assertIn("Raw material", _exhibit_texts(exhibit))
+        self.assertIn("* At month end", _exhibit_texts(exhibit))
 
 
 if __name__ == "__main__":

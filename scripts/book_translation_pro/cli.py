@@ -27,6 +27,7 @@ from .qa import run_qa
 from .release import release_check
 from .retrofit import exhibit_blocks, retrofit_exhibits
 from .runtime import doctor_report
+from .readiness import readiness_report
 from .runtime_adapters import conformance_cases
 from .state import (
     dispatch_unit,
@@ -42,7 +43,8 @@ from .visual import record_visual_review, show_page
 # Every command that reads and rewrites shared project state runs under the
 # project lock so parallel workers cannot overwrite each other's records.
 PROJECT_LOCKED_COMMANDS = frozenset({
-    "prepare", "visualize", "reconstruct-figures", "retrofit-exhibits", "render-figures", "exhibit-review", "normalize-images", "plan", "show-unit",
+    "prepare", "visualize", "reconstruct-figures", "retrofit-exhibits", "render-figures", "exhibit-review", "source-readiness",
+    "normalize-images", "plan", "show-unit",
     "record", "qa", "build", "typeset", "publication-review", "migrate",
 })
 
@@ -356,6 +358,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_exhibit_review.add_argument("project")
     p_exhibit_review.set_defaults(handler=lambda args: build_exhibit_review(
         _project(args.project), load_resolved_project(_project(args.project))[0]))
+
+    p_readiness = sub.add_parser(
+        "source-readiness",
+        help="Check the prepared source units before translation and write qa/source-readiness.json and .md",
+    )
+    p_readiness.add_argument("project")
+    p_readiness.set_defaults(handler=lambda args: readiness_report(_project(args.project)))
 
     p_normalize_images = sub.add_parser(
         "normalize-images",
