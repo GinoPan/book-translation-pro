@@ -78,9 +78,9 @@ PyMuPDF 和 Pillow 会随 Python 包安装。`btp doctor` 会报告当前环境�
 
 **语言范围：** 翻译、断点续作和完整性检查适用于任意语言对；但默认字体、脚注标记修复、日期检查和图表标题识别是按中文译文调校的，目前只在英译中上验证过。目标语言不是中文时，`btp init` 会给出提示。
 
-## 作为 Codex Skill 使用
+## 作为Skill 使用
 
-将仓库克隆到 Codex 的 skills 目录：
+将仓库克隆到 agent 的 skills 目录：
 
 ```bash
 git clone https://github.com/GinoPan/book-translation-pro.git ~/.codex/skills/book-translation-pro
