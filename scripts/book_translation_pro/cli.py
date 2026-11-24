@@ -12,7 +12,9 @@ from . import __version__
 from .artifacts import BTPError, atomic_copy, load_json, normalize_path, project_lock, safe_project_path, validate_schema
 from .build import build_outputs, typeset_preview
 from .config import load_resolved_project
-from .figures import normalize_image_backgrounds, reconstruct_figures
+from .exhibit_review import build_exhibit_review, record_exhibit_review
+from .figure_render import render_project_figures
+from .figures import _figure_asset_name, normalize_image_backgrounds, reconstruct_figures
 from .exceptions import record_exceptions
 from .glossary import load_effective_glossary, save_glossary, select_entries, validate_glossary
 from .manifest import load_manifest
@@ -23,6 +25,7 @@ from .publication import publication_table_inventory
 from .publication_review import create_review_template, record_publication_review
 from .qa import run_qa
 from .release import release_check
+from .retrofit import exhibit_blocks, retrofit_exhibits
 from .runtime import doctor_report
 from .runtime_adapters import conformance_cases
 from .state import (
@@ -39,7 +42,7 @@ from .visual import record_visual_review, show_page
 # Every command that reads and rewrites shared project state runs under the
 # project lock so parallel workers cannot overwrite each other's records.
 PROJECT_LOCKED_COMMANDS = frozenset({
-    "prepare", "visualize", "reconstruct-figures", "normalize-images", "plan", "show-unit",
+    "prepare", "visualize", "reconstruct-figures", "retrofit-exhibits", "render-figures", "exhibit-review", "normalize-images", "plan", "show-unit",
     "record", "qa", "build", "typeset", "publication-review", "migrate",
 })
 
@@ -134,6 +137,29 @@ def chapter_context(project: Path, ordered: list[dict[str, Any]], index: int, bu
     return list(reversed(context))
 
 
+def _unit_exhibits(project: Path, source_text: str) -> list[dict[str, Any]]:
+    """Label blocks and rebuilt tables in the unit, with what the translator needs
+    beside them: the source crop to look at, and totals that do not add up."""
+    inventory_path = project / "analysis" / "exhibit-inventory.json"
+    inventory = load_json(inventory_path)["exhibits"] if inventory_path.is_file() else []
+    out = []
+    for block in exhibit_blocks(source_text):
+        item: dict[str, Any] = {"exhibit": block["key"], "kind": block["kind"]}
+        if block["kind"] == "figure-labels":
+            item["labels"] = len(block["labels"])
+            crop = project / "assets" / "original" / "images" / _figure_asset_name(block["key"])
+            if crop.is_file():
+                item["source_image"] = str(crop)
+        else:
+            item["totals_not_adding_up"] = [
+                dict(total, page=exhibit["page"])
+                for exhibit in inventory if exhibit["key"] == block["key"]
+                for total in exhibit.get("checks", {}).get("totals", []) if total["verdict"] == "mismatch"
+            ]
+        out.append(item)
+    return out
+
+
 def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
     config, _ = load_resolved_project(project)
     manifest = load_manifest(project)
@@ -191,6 +217,7 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
             }
             for page in page_map["pages"] if page["page_index"] in wanted
         ]
+    payload["exhibits"] = _unit_exhibits(project, source_text)
     if phase == "edit":
         payload["draft_file"] = str(safe_project_path(project, entry["draft_file"]))
     if phase == "translate":
@@ -301,6 +328,35 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
 
+    p_retrofit = sub.add_parser(
+        "retrofit-exhibits",
+        help="Replace exhibit extraction fragments in prepared source units with figure-label blocks or rebuilt tables",
+    )
+    p_retrofit.add_argument("project")
+    p_retrofit.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the changes; the default only writes analysis/exhibit-retrofit-plan.json",
+    )
+    p_retrofit.set_defaults(handler=lambda args: retrofit_exhibits(_project(args.project), apply=args.apply))
+
+    p_render_figures = sub.add_parser(
+        "render-figures",
+        help="Draw translated diagrams from the target figure-label blocks (cached by input hash)",
+    )
+    p_render_figures.add_argument("project")
+    p_render_figures.add_argument("--force", action="store_true", help="Render every diagram again, ignoring the cache")
+    p_render_figures.set_defaults(handler=lambda args: render_project_figures(
+        _project(args.project), load_resolved_project(_project(args.project))[0], force=args.force))
+
+    p_exhibit_review = sub.add_parser(
+        "exhibit-review",
+        help="Draw every exhibit beside its translation and write the review file and overview page",
+    )
+    p_exhibit_review.add_argument("project")
+    p_exhibit_review.set_defaults(handler=lambda args: build_exhibit_review(
+        _project(args.project), load_resolved_project(_project(args.project))[0]))
+
     p_normalize_images = sub.add_parser(
         "normalize-images",
         help="Flip inverted dark-background line-art scans back to dark-on-white",
@@ -334,7 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_record = sub.add_parser("record", help="Validate and record a worker result or checkpoint")
     p_record.add_argument("project")
-    p_record.add_argument("--kind", required=True, choices=("draft", "edit", "capsule", "observation", "glossary", "visual-review", "publication-review", "exceptions", "review", "failure"))
+    p_record.add_argument("--kind", required=True, choices=("draft", "edit", "capsule", "observation", "glossary", "visual-review", "publication-review", "exhibit-review", "exceptions", "review", "failure"))
     p_record.add_argument("--unit")
     p_record.add_argument("--input")
     p_record.add_argument("--checkpoint")
@@ -370,6 +426,10 @@ def build_parser() -> argparse.ArgumentParser:
             if not args.input:
                 raise BTPError("--input is required")
             return record_visual_review(project, Path(args.input).resolve())
+        if args.kind == "exhibit-review":
+            if not args.input:
+                raise BTPError("--input is required")
+            return record_exhibit_review(project, config, Path(args.input).resolve())
         if args.kind == "publication-review":
             if not args.input:
                 raise BTPError("--input is required")

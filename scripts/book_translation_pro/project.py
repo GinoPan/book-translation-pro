@@ -27,7 +27,7 @@ from .glossary import empty_glossary, load_effective_glossary, load_glossary, re
 from .ingest import SUPPORTED_SUFFIXES, convert_to_markdown, source_format
 from .manifest import create_manifest
 from .rights import DEFAULT_RIGHTS, rights_warning
-from .state import empty_record, initialize_state, load_state, now_utc, save_state
+from .state import empty_record, exhibits_review_default, initialize_state, load_state, now_utc, save_state
 from .structure import draft_book_map, expand_long_segments, make_work_units, parse_blocks, profile_markdown
 from .visual import augment_markdown_with_scanned_page_ocr, prepare_visual
 
@@ -300,7 +300,9 @@ def _refresh_config(project: Path, resolved: dict[str, Any], config_hash: str, m
     state["human_reviews"] = [item for item in state.get("human_reviews", []) if item["checkpoint"] in checkpoints]
     for name in checkpoints:
         if name not in existing:
-            state["human_reviews"].append({"checkpoint": name, "status": "pending", "recorded_at": now_utc(), "notes": ""})
+            status, notes = (exhibits_review_default(resolved["source"].get("format") == "pdf") if name == "exhibits"
+                             else ("pending", ""))
+            state["human_reviews"].append({"checkpoint": name, "status": status, "recorded_at": now_utc(), "notes": notes})
     for name in ("qa", "build"):
         state["stages"][name].update({"status": "invalidated", "reason_codes": ["config_changed"], "updated_at": now_utc()})
     save_state(project, state)
@@ -346,12 +348,25 @@ def _bootstrap_samples(unit_ids: list[str], count: int) -> list[str]:
     return [unit_ids[index] for index in indexes]
 
 
+def _prepared_extraction_hash(manifest: dict[str, Any], previous_resolved: dict[str, Any] | None) -> str | None:
+    """The extraction settings the manifest was prepared with.  A manifest from before
+    that hash was stored takes it from the previous resolved configuration, but only
+    when that file is provably the one the manifest was prepared with."""
+    if manifest.get("extraction_config_hash"):
+        return manifest["extraction_config_hash"]
+    if previous_resolved is not None and hash_data(previous_resolved) == manifest.get("resolved_config_hash"):
+        return extraction_config_hash(previous_resolved)
+    return None
+
+
 def prepare_project(
     project: Path, rebuild: bool = False, overrides: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     project = normalize_path(project)
     if overrides:
         persist_overrides(project, overrides)
+    previous_path = project / "resolved-config.json"
+    previous_resolved = load_json(previous_path) if previous_path.is_file() else None
     resolved, config_hash = resolve_project(project)
     extraction_hash = extraction_config_hash(resolved)
     fingerprint = _source_fingerprint(project, resolved)
@@ -361,7 +376,8 @@ def prepare_project(
         if existing.get("source_fingerprint") == fingerprint:
             if existing.get("resolved_config_hash") == config_hash:
                 return {"reused": True, "unit_count": len(existing.get("units", [])), "manifest": str(manifest_path)}
-            if existing.get("extraction_config_hash") == extraction_hash:
+            if _prepared_extraction_hash(existing, previous_resolved) == extraction_hash:
+                existing["extraction_config_hash"] = extraction_hash
                 return _refresh_config(project, resolved, config_hash, existing)
         raise BTPError(
             "Source or extraction settings changed since prepare; rerun prepare with --rebuild "

@@ -67,8 +67,48 @@ def _paired_blocks(source: str, target: str) -> list[tuple[str, str]]:
     """
     source_blocks, target_blocks = parse_blocks(source), parse_blocks(target)
     if len(source_blocks) > 1 and [block.kind for block in source_blocks] == [block.kind for block in target_blocks]:
-        return list(zip(_standalone_texts(source_blocks), _standalone_texts(target_blocks)))
+        pairs = list(zip(_standalone_texts(source_blocks), _standalone_texts(target_blocks)))
+        # Equal kinds do not prove equal content: PDF page headers and folios
+        # the translation dropped, or paragraphs it merged and split, leave the
+        # same block count with every pair shifted.  Pair only when each pair
+        # could be the same text.
+        if all(_plausible_pair(left, right) for left, right in pairs):
+            return pairs
     return [(source, target)]
+
+
+_NUMBER_RE = re.compile(r"\d[\d,.]*\d")
+_CJK_RE = re.compile(r"[㐀-鿿぀-ヿ가-힯]")
+_WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)?")
+
+
+def _visible_text(markdown: str) -> str:
+    return re.sub(r"<[^>]+>", " ", markdown)
+
+
+def _content_weight(text: str) -> float:
+    """Words plus 0.6 per CJK character, the weighting the QA length check uses."""
+    cjk = len(_CJK_RE.findall(text))
+    return len(_WORD_RE.findall(_CJK_RE.sub(" ", text))) + 0.6 * cjk
+
+
+def _plausible_pair(source: str, target: str) -> bool:
+    """Whether two blocks could be translations of each other.
+
+    Length must agree within a translation's normal spread, and the multi-digit
+    numbers of the source must mostly survive.  Short blocks (a folio, a running
+    head) pass on length only when both are short.
+    """
+    source_text, target_text = _visible_text(source), _visible_text(target)
+    source_weight, target_weight = _content_weight(source_text), _content_weight(target_text)
+    if max(source_weight, target_weight) >= 12 and not 0.4 <= (target_weight + 1) / (source_weight + 1) <= 2.5:
+        return False
+    numbers = {number.replace(",", "") for number in _NUMBER_RE.findall(source_text)}
+    if len(numbers) >= 2:
+        target_digits = target_text.replace(",", "")
+        if sum(number in target_digits for number in numbers) < len(numbers) / 2:
+            return False
+    return True
 
 
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
@@ -100,6 +140,8 @@ _ID_SPAN_RE = re.compile(
     re.IGNORECASE,
 )
 _PAGE_ANCHOR_RE = re.compile(r"<a\b[^>]*\bhref\s*=\s*[\"']#([^\"']+)[\"']", re.IGNORECASE)
+_ANCHOR_OPEN_TAG_RE = re.compile(r"<a\b[^>]*>", re.IGNORECASE)
+_ANCHOR_ID_ATTR_RE = re.compile(r"\s+id\s*=\s*[\"'](?P<value>[^\"']+)[\"']", re.IGNORECASE)
 
 
 def _drop_wrapper_tags(fragment: str, side: str, seen: set[str]) -> str:
@@ -123,7 +165,21 @@ def _drop_wrapper_tags(fragment: str, side: str, seen: set[str]) -> str:
         seen.add(identifier)
         return f"\x00btp-anchor-{len(anchors) - 1}\x00"
 
+    def namespace_anchor_id(match: re.Match[str]) -> str:
+        # An id on a content-bearing anchor (a CHM image link ``<a id="IMG_1">``)
+        # repeats on both language sides like any other id.  Calibre extraction
+        # ids are left for ``strip_extraction_links``.
+        tag = match.group(0)
+        id_match = _ANCHOR_ID_ATTR_RE.search(tag)
+        if not id_match or id_match.group("value").startswith("calibre_link-"):
+            return tag
+        identifier = f"{side}-{id_match.group('value')}"
+        replacement = "" if identifier in seen else f' id="{identifier}"'
+        seen.add(identifier)
+        return tag[:id_match.start()] + replacement + tag[id_match.end():]
+
     fragment = _ID_SPAN_RE.sub(stash, fragment)
+    fragment = _ANCHOR_OPEN_TAG_RE.sub(namespace_anchor_id, fragment)
     fragment = _PAGE_ANCHOR_RE.sub(lambda match: match.group(0).replace(f"#{match.group(1)}", f"#{side}-{match.group(1)}"), fragment)
     fragment = re.sub(r"</?(?:div|span)\b[^>]*>", "", fragment, flags=re.IGNORECASE)
     for index, anchor in enumerate(anchors):

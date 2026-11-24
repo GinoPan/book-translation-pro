@@ -656,6 +656,42 @@ class RawHtmlHygieneTests(unittest.TestCase):
 
         self.assertEqual(flatten('See <a href="7485final/LiB0115.html">chapter 2</a>.'), "See chapter 2.")
         self.assertEqual(flatten('<a href="ch02.xhtml#s1">next</a>'), "next")
+        self.assertEqual(flatten('<a href="7485final/images/cd.zip">the CD</a>'), "the CD")
+        from book_translation_pro.publication import clean_markdown_for_publication as clean_alt
+
+        alt_cleaned = clean_alt("Text.\n\n![点击展开](assets/original/a.png)\n\n![Click To expand](assets/original/b.png)\n\n"
+                                "![Click to expand the chart of costs](assets/original/c.png)\n")
+        self.assertIn("![](assets/original/a.png)", alt_cleaned)
+        self.assertIn("![](assets/original/b.png)", alt_cleaned)
+        # Real alt text that merely starts with the hint is kept.
+        self.assertIn("![Click to expand the chart of costs](assets/original/c.png)", alt_cleaned)
+        # Promotion runs inside the publication cleanup, so a thumbnail linked to its
+        # full-size image ends as the full-size image with no dead link around it.
+        from book_translation_pro.publication import clean_markdown_for_publication as clean
+
+        cleaned = clean(
+            'Text.\n\n<a href="7485final/images/f1_0.jpg" id="IMG_1">'
+            '<img src="assets\\original/7485final/images/f1.jpg" alt="x"/></a>\n\nMore.\n')
+        self.assertIn("![x](assets/original/7485final/images/f1_0.jpg)", cleaned)
+        self.assertNotIn('href="7485final/images/f1_0.jpg"', cleaned)
+        # A link to the very image it wraps flattens; the image stays.
+        self.assertEqual(
+            flatten('<a href="7485final/images/f1_0.jpg" id="IMG_1">![x](assets/original/7485final/images/f1_0.jpg)</a>'),
+            "![x](assets/original/7485final/images/f1_0.jpg)")
+        self.assertEqual(flatten(r'<a href="p/f1.png"><img src="assets\original/p/f1.png" alt="x"/></a>'),
+                         r'<img src="assets\original/p/f1.png" alt="x"/>')
+        # The bilingual edition keeps thumbnails, so a link to a full-size file the
+        # edition does not ship flattens there only; a link into assets/ stays.
+        thumbnail = r'<a href="7485final/images/f1_0.jpg"><img src="assets\original/7485final/images/f1.jpg"/></a>'
+        self.assertEqual(flatten(thumbnail, unpromoted_images=True),
+                         r'<img src="assets\original/7485final/images/f1.jpg"/>')
+        self.assertEqual(flatten(thumbnail), thumbnail)
+        kept_link = '<a href="assets/big.png"><img src="assets/original/small.png"/></a>'
+        self.assertEqual(flatten(kept_link, unpromoted_images=True), kept_link)
+        # A link to a different image, or one that also wraps text, is kept.
+        for kept in ('<a href="p/big.png">![x](assets/original/p/small.png)</a>',
+                     '<a href="p/f1.png">Figure ![x](assets/original/p/f1.png)</a>'):
+            self.assertEqual(flatten(kept), kept)
         for kept in ('<a href="https://example.org/a.html">site</a>', '<a href="#ch01">top</a>',
                      '<a href="assets/big.png"><img src="assets/small.png"/></a>',
                      '<a href="images/big.png"><img src="images/small.png"/></a>'):

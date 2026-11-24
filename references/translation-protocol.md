@@ -49,6 +49,30 @@ QA blocks omitted paragraphs, truncated units, and text left in the source langu
 
 - `structure_reflowed: <reason>`: prose blocks were legitimately merged or removed (for example, OCR label fragments)
 - `untranslated_by_design: <reason>`: material intentionally kept in the source language (for example, a bibliography)
+- `source_error_corrected: <printed> -> <corrected> (exhibit <key>): <reason>`: a misprinted value was corrected (see Exhibits)
+
+## Exhibits
+
+`show-unit` lists the unit's `exhibits`: figure-label blocks (with the source image to look at) and rebuilt tables (with any total that does not add up). The translated figure is drawn from the label block, so its form matters as much as its words.
+
+**Figure labels.** A diagram's image is followed by its labels:
+
+```markdown
+<!-- btp:figure-labels exhibit="4.3" -->
+1. Customer Needs
+2. Strategy Changes
+<!-- /btp:figure-labels -->
+```
+
+- Keep both marker lines, every number, and the order; one translated label per numbered line, never merged, split, or dropped.
+- Translate each label as the words printed in the figure, as short as the source; never describe the figure or add text that is not on it.
+- Mark where a label may wrap with `|` between words or word groups (`客户|需求`, `价值流|战略`); never inside a word or term. A label with no `|` stays on one line or shrinks.
+- Where the figure stacks separate items in one label (rows of a list, `Cost` / `Throughput Time` / …), start each item on its own line with `||` (`成本||吞吐时间||机器效率`). A bulleted list already gets one item per line.
+- Copy codes, numbers, and symbols that are not words (`FR1`, `PS2`, `M1`, `+`) unchanged.
+
+**Rebuilt tables.** A table between `<!-- btp:exhibit-table exhibit="…" -->` and `<!-- /btp:exhibit-table -->` was rebuilt from the page. Keep the markers, every row and column, and empty cells; translate cell by cell; keep every number exactly as printed.
+
+**Source misprints.** Only when `show-unit` reports a total that does not add up and the rows show which printed value is wrong: put the corrected value in the table, declare it in `source_issues` as `source_error_corrected: 3.4% -> 15.2% (exhibit 7.3): rows sum to 15.2%`, and add a translator's note directly below the table's closing marker giving the printed value, for example `> 译者注：原书此处印作 3.4%，按各行合计应为 15.2%，已改正。` Never change any other number; when the wrong value cannot be identified, leave the numbers and report the mismatch in `source_issues` instead.
 
 ## Edit Pass
 
@@ -56,7 +80,8 @@ Use `show-unit --phase edit`. Compare the draft with the source and constraints.
 
 - Remove translationese, awkward source-language syntax, needless repetition, and inconsistent register.
 - Preserve every factual and structural invariant from the translation rules.
-- Do not add explanations or translator notes unless explicitly requested.
+- Do not add explanations or translator notes unless explicitly requested; a declared source-misprint note (see Exhibits) stays.
+- Keep figure-label blocks and rebuilt tables in the form the Exhibits rules require.
 - Write the complete edited unit to the expected edited path. Do not overwrite the draft.
 
 ## Worker boundary

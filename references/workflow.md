@@ -47,6 +47,15 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
    BTP prepare <project-dir>
    ```
 
+   For a PDF source, then build the exhibit inventory and replace exhibit fragments with figure-label blocks and rebuilt tables, before any translation. Run it first without `--apply`, read the report, then apply:
+
+   ```text
+   BTP retrofit-exhibits <project-dir>
+   BTP retrofit-exhibits <project-dir> --apply
+   ```
+
+   Every run, with or without `--apply`, rewrites `analysis/exhibit-inventory.json`; step 10 needs it. On a book whose exhibit review is already recorded, a new run can make that review stale.
+
 4. For PDF, inspect every page listed in `analysis/visual-summary.json.required_review_pages`:
 
    ```text
@@ -78,9 +87,18 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
 9. For each edit unit, inspect `show-unit --phase edit`, author a separate edited file, and record it with `record --kind edit`.
 
-10. Run `BTP qa <project-dir>`. This runs Visual QA, Completeness QA, and the source-PDF exhibit inventory together. Fix every blocking issue, including vector-only exhibits that have a target caption but no visual asset or auditable reconstruction record. In Publication mode, warnings must be resolved or entered in an approved `qa/exceptions.json` record.
+10. For a PDF source (the `exhibits` checkpoint waits for every PDF book, even one with no translated exhibits), run `BTP render-figures <project-dir>` to draw the translated diagrams, then `BTP exhibit-review <project-dir>`. Look at every comparison in `qa/exhibit-review/` and set each verdict in `qa/exhibit-review/review.json` to `ok` or `flagged` (a flagged exhibit needs a note; one with an automatic problem must be flagged). Record it, show the user `qa/exhibit-review/index.html` (flagged exhibits first), and after their approval:
 
-11. Create and render a candidate with `BTP typeset <project-dir>`. Run `BTP publication-review <project-dir>`, complete all seven checks in the generated template, and record the review:
+   ```text
+   BTP record <project-dir> --kind exhibit-review --input <judged-review.json>
+   BTP record <project-dir> --kind review --checkpoint exhibits --approve --reviewer <name>
+   ```
+
+   The approval is bound to the recorded review; any later change to a label, table, or render makes it stale.
+
+11. Run `BTP qa <project-dir>`. This runs Visual QA, Completeness QA, and the source-PDF exhibit inventory together. Fix every blocking issue, including vector-only exhibits that have a target caption but no visual asset or auditable reconstruction record. In Publication mode, warnings must be resolved or entered in an approved `qa/exceptions.json` record.
+
+12. Create and render a candidate with `BTP typeset <project-dir>`. Run `BTP publication-review <project-dir>`, complete all seven checks in the generated template, and record the review:
 
    ```text
    BTP record <project-dir> --kind publication-review --input <completed-review.json>
@@ -89,7 +107,7 @@ Let `BTP` mean the current Python interpreter followed by `<skill-root>/scripts/
 
    If a check uses an exception, record the approved exception list first with `BTP record <project-dir> --kind exceptions --input <exceptions.json>`.
 
-12. Rerun `BTP qa <project-dir>`, then `BTP build <project-dir>` and `BTP status <project-dir>`. Publication `build` copies the reviewed candidate files byte-for-byte into `dist/` and verifies their hashes.
+13. Rerun `BTP qa <project-dir>`, then `BTP build <project-dir>` and `BTP status <project-dir>`. Publication `build` copies the reviewed candidate files byte-for-byte into `dist/` and verifies their hashes.
 
 For layout iteration before QA is green, run `BTP typeset <project-dir>`. This creates a clearly marked review candidate under `dist/typeset-preview/` and never changes the build stage or bypasses the final build gate. Any later candidate, clean-master, review, exception, or generated-file change invalidates the recorded signoff.
 

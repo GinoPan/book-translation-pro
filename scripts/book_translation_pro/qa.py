@@ -11,7 +11,7 @@ from typing import Any
 
 from .artifacts import BTPError, atomic_write_json, atomic_write_text, hash_data, load_json, portable_path, safe_project_path, sha256_file, validate_schema
 from .exceptions import approved_exception_ids
-from .glossary import load_effective_glossary, select_entries, target_matches
+from .glossary import entry_matches, load_effective_glossary, select_entries, target_matches
 from .manifest import load_manifest, validate_manifest_sources
 from .config import config_drifted
 from .state import load_state, now_utc, recorded_dependencies, save_state, unit_dependencies
@@ -25,7 +25,10 @@ from .publication import (
 )
 from .rights import publication_rights_issues, rights_warning
 from .structure import IMAGE_RE, parse_blocks
+from .exhibits import keeps_source_form
+from .figure_render import RENDER_REPORT, diagram_blocks, diagram_render_problems
 from .figures import STRUCTURED_RECONSTRUCTION_PREFIXES, run_figure_audit
+from .retrofit import exhibit_blocks
 from .visual import run_visual_qa
 
 
@@ -530,6 +533,253 @@ def _check_local_resources(project: Path, refs: list[str], checks: list[dict[str
             _check(checks, "assets.missing", "fail", f"Missing local resource: {ref}", unit_id)
 
 
+# Phrases a translator writes when explaining that a figure or table could not
+# be extracted cleanly.  They describe the tooling, not the book, so a reader
+# should never meet them in the translation.
+_TRANSLATOR_NOTE_RE = re.compile(
+    r"(?:原始|源)(?:文字层|文本层)|文字层|OCR\s?(?:碎片|文字|识别|结果)|独立碎片|文字碎片|"
+    r"\b(?:OCR (?:fragments?|text)|text layer)\b|could not be (?:reliably|accurately) (?:reconstructed|recovered)",
+    re.IGNORECASE,
+)
+_SOURCE_TOOLING_RE = re.compile(r"\bOCR\b|text layer|文字层", re.IGNORECASE)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+# A glossary entry missing from this share of the units that mention it is
+# reported even while the entry is unapproved and so not enforced.
+TERM_COVERAGE_WARN_RATIO = 0.3
+TERM_COVERAGE_MIN_UNITS = 3
+
+
+def has_translator_note(source: str, target: str) -> bool:
+    """Whether the target comments on extraction problems the source never mentions."""
+    if _SOURCE_TOOLING_RE.search(source):
+        return False
+    prose = _HTML_COMMENT_RE.sub("", re.sub(r"```.*?```", "", target, flags=re.DOTALL))
+    return bool(_TRANSLATOR_NOTE_RE.search(prose))
+
+
+def _glossary_coverage_checks(
+    checks: list[dict[str, Any]], glossary: dict[str, Any], units: list[tuple[str, str | None, str, str]]
+) -> None:
+    """Report glossary entries the per-unit check cannot enforce.
+
+    ``terminology.approved`` applies only to approved entries whose scopes name
+    a Book Map node of the unit (an empty list means the whole book).  An entry
+    left at ``needs_review``, or scoped to a word such as ``entire-book`` that
+    names no node, is never applied, so drift from it goes unseen.  Say so once
+    for each cause, and name every such entry the target leaves out of a
+    sizeable share of the units that mention it.
+    """
+    known_nodes = {node_id for _, node_id, _, _ in units}
+    entries = [entry for entry in glossary["entries"] if entry["status"] != "rejected"]
+
+    def inert_scope(entry: dict[str, Any]) -> bool:
+        scopes = entry.get("scopes", [])
+        return bool(scopes) and not known_nodes.intersection(scopes)
+
+    unapproved = [entry for entry in entries if entry["status"] != "approved"]
+    if unapproved:
+        _check(checks, "terminology.unapproved", "warn",
+               f"{len(unapproved)} glossary entries are not approved, so the approved-target check does not enforce them")
+    misscoped = [entry for entry in entries if inert_scope(entry)]
+    if misscoped:
+        examples = ", ".join(sorted({scope for entry in misscoped for scope in entry["scopes"]})[:3])
+        _check(checks, "terminology.scope", "warn",
+               f"{len(misscoped)} glossary entries are scoped to no Book Map node ({examples}), so they apply to no unit; "
+               "use an empty scopes list for the whole book")
+    for entry in entries:
+        if entry["status"] == "approved" and not inert_scope(entry):
+            continue
+        scopes = [] if inert_scope(entry) else entry.get("scopes", [])
+        mentioning = [
+            (unit_id, target) for unit_id, node_id, source, target in units
+            if (not scopes or node_id in scopes) and entry_matches(entry, source)
+        ]
+        missing = [unit_id for unit_id, target in mentioning if not target_matches(entry, target)]
+        if len(mentioning) >= TERM_COVERAGE_MIN_UNITS and len(missing) / len(mentioning) > TERM_COVERAGE_WARN_RATIO:
+            _check(checks, "terminology.coverage", "warn",
+                   f"{entry['source']!r} -> {entry['target']!r} is missing from {len(missing)} of {len(mentioning)} "
+                   f"units that mention it (first: {', '.join(missing[:4])}); the entry is not enforced")
+
+
+# Lines a worker's tooling can leave in an output file: patch envelopes and
+# observation JSON.  None of them is book text.
+TOOL_TEXT_RE = re.compile(
+    r'^\s*(?:\*\*\* (?:Begin Patch|End Patch|Add File:|Update File:|Delete File:|Move to:)'
+    r'|\{"schema_version"\s*:\s*\d+\s*,\s*"(?:new_entries|unit_id|summary)")'
+)
+
+
+# ``source_error_corrected: 3.4% -> 15.2% (exhibit 7.3): rows sum to 15.2%``
+CORRECTION_RE = re.compile(r"^source_error_corrected:\s*(\S+)\s*->\s*(\S+)\s*\(exhibit\s+([^)\s]+)\)\s*:\s*\S")
+_TABLE_ROW_RE = re.compile(r"^\|.*\|\s*$", re.MULTILINE)
+_TABLE_RULE_RE = re.compile(r"^\|(?:\s*:?-+:?\s*\|)+\s*$")
+
+
+def _declared_corrections(observation: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """(printed, corrected, exhibit key) for each declared source misprint correction."""
+    return [match.groups() for issue in map(str, observation.get("source_issues", []))
+            if (match := CORRECTION_RE.match(issue.strip()))]
+
+
+def _correction_notes(target: str) -> tuple[str, dict[str, str]]:
+    """The target without translator's notes set right below a rebuilt table, and
+    those notes by exhibit key (the note quotes the printed value, a number QA
+    must not count as table content)."""
+    notes: dict[str, str] = {}
+    cut: list[tuple[int, int]] = []
+    for block in exhibit_blocks(target):
+        if block["kind"] != "exhibit-table":
+            continue
+        match = re.match(r"\n+((?:>[^\n]*(?:\n|$))+)", target[block["span"][1]:])
+        if match:
+            notes[block["key"]] = match.group(1)
+            cut.append((block["span"][1] + match.start(1), block["span"][1] + match.end(1)))
+    for start, end in reversed(cut):
+        target = target[:start] + target[end:]
+    return target, notes
+
+
+def _corrected_back(tokens: Counter[str], corrections: list[tuple[str, str, str]], key: str | None = None) -> Counter[str]:
+    """Numbers as printed: each declared corrected value turned back into its printed one."""
+    tokens = Counter(tokens)
+    for printed, corrected, exhibit in corrections:
+        if key is None or exhibit == key:
+            fixed, original = _number_tokens(corrected), _number_tokens(printed)
+            if not fixed - tokens:
+                tokens = tokens - fixed + original
+    return tokens
+
+
+def _exhibit_unit_checks(
+    checks: list[dict[str, Any]], unit_id: str, source: str, target: str, observation: dict[str, Any]
+) -> str:
+    """Label blocks and rebuilt tables survive translation in the form the renderer and
+    publication rely on.  Returns the target without misprint notes, for the number check."""
+    source_blocks, target_blocks = exhibit_blocks(source), exhibit_blocks(target)
+    corrections = _declared_corrections(observation)
+    if not source_blocks and not target_blocks and not corrections:
+        return target
+    stripped, notes = _correction_notes(target)
+
+    def kinds(blocks: list[dict[str, Any]]) -> Counter[tuple[str, str]]:
+        return Counter((block["kind"], block["key"]) for block in blocks)
+
+    if kinds(source_blocks) != kinds(target_blocks):
+        missing, extra = kinds(source_blocks) - kinds(target_blocks), kinds(target_blocks) - kinds(source_blocks)
+        _check(checks, "exhibit.blocks", "fail",
+               f"Exhibit blocks changed (missing: {sorted(missing) or 'none'}; unexpected: {sorted(extra) or 'none'}); "
+               "keep every figure-label and exhibit-table block with its markers", unit_id)
+        return stripped
+    for kind_key in kinds(source_blocks):
+        pairs = zip([b for b in source_blocks if (b["kind"], b["key"]) == kind_key],
+                    [b for b in target_blocks if (b["kind"], b["key"]) == kind_key])
+        for src, tgt in pairs:
+            key = src["key"]
+            if src["kind"] == "figure-labels":
+                if tgt["numbers"] != src["numbers"]:
+                    _check(checks, "exhibit.labels", "fail",
+                           f"Exhibit {key}: {len(tgt['numbers'])} numbered labels, the source has {len(src['numbers'])}; "
+                           "translate one label per numbered line", unit_id)
+                    continue
+                for number, original, translated in zip(src["numbers"], src["labels"], tgt["labels"]):
+                    drawn = translated.replace("|", "").strip()
+                    if keeps_source_form(original) and drawn != original:
+                        _check(checks, "exhibit.labels", "fail",
+                               f"Exhibit {key} label {number}: code {original!r} must be copied unchanged, got {drawn!r}", unit_id)
+                    elif not keeps_source_form(original) and drawn == original:
+                        _check(checks, "exhibit.labels", "fail",
+                               f"Exhibit {key} label {number}: {original!r} was left untranslated", unit_id)
+                continue
+            source_rows = [row for row in _TABLE_ROW_RE.findall(src["body"]) if not _TABLE_RULE_RE.match(row)]
+            target_rows = [row for row in _TABLE_ROW_RE.findall(tgt["body"]) if not _TABLE_RULE_RE.match(row)]
+            if len(source_rows) != len(target_rows):
+                _check(checks, "exhibit.table", "fail",
+                       f"Exhibit {key}: {len(target_rows)} table rows, the source has {len(source_rows)}", unit_id)
+            printed = _corrected_back(_number_tokens(tgt["body"]), corrections, key)
+            if printed != _number_tokens(src["body"]):
+                source_numbers, target_numbers = _number_tokens(src["body"]), printed
+                _check(checks, "exhibit.table", "fail",
+                       f"Exhibit {key}: table numbers changed beyond declared corrections (source-only: "
+                       f"{_compact_counter(source_numbers - target_numbers)}; target-only: "
+                       f"{_compact_counter(target_numbers - source_numbers)})", unit_id)
+    for printed, corrected, key in corrections:
+        if printed not in notes.get(key, ""):
+            _check(checks, "exhibit.correction_note", "fail",
+                   f"Correction {printed} -> {corrected} in exhibit {key} needs a translator's note quoting {printed} "
+                   "directly below the table", unit_id)
+    return stripped
+
+
+def _exhibit_review_checks(project: Path, config: dict[str, Any], checks: list[dict[str, Any]]) -> None:
+    """The recorded exhibit review covers what is there now; its flags reach the user;
+    an approval of the exhibits checkpoint is for that same review."""
+    from .exhibit_review import RECORD, stale_items
+
+    path = project / RECORD
+    if not path.is_file():
+        _check(checks, "exhibit.review_record", "fail",
+               "No recorded exhibit review: run exhibit-review, judge every exhibit, and record it "
+               "(record --kind exhibit-review)")
+        return
+    review = load_json(path)
+    stale = stale_items(project, config, review)
+    if stale:
+        _check(checks, "exhibit.review_record", "fail",
+               f"The recorded exhibit review is stale for {len(stale)} exhibit(s): {', '.join(stale[:10])}; "
+               "run exhibit-review again and record it")
+    else:
+        _check(checks, "exhibit.review_record", "pass", f"All {len(review['items'])} exhibits reviewed")
+    flagged = [item["id"] for item in review["items"] if item["verdict"] == "flagged"]
+    if flagged:
+        _check(checks, "exhibit.review_flagged", "warn",
+               f"{len(flagged)} exhibit(s) flagged for the user (qa/exhibit-review/index.html): {', '.join(flagged)}")
+    approval = next((item for item in load_state(project).get("human_reviews", [])
+                     if item["checkpoint"] == "exhibits" and item["status"] == "approved"), None)
+    if approval and approval.get("evidence_hashes", {}).get("exhibit_review") != sha256_file(path):
+        _check(checks, "exhibit.review_approval", "fail",
+               "The exhibits checkpoint was approved for a different exhibit review; approve the current one")
+
+
+def _exhibit_book_checks(project: Path, config: dict[str, Any], checks: list[dict[str, Any]],
+                         corrected_keys: set[str]) -> None:
+    """Every translated diagram is rendered from its current labels and passed its
+    checks; totals that do not add up and exhibits left as they were are reported."""
+    inventory_path = project / "analysis" / "exhibit-inventory.json"
+    if not inventory_path.is_file():
+        return
+    inventory = load_json(inventory_path)["exhibits"]
+    report_path = project / RENDER_REPORT
+    renders = load_json(report_path).get("renders", {}) if report_path.is_file() else {}
+    rendered = 0
+    for item in diagram_blocks(project, config):
+        problems = diagram_render_problems(project, item, renders)
+        if problems:
+            where = f" (page {item['exhibit']['page']})" if item["exhibit"] else ""
+            _check(checks, "exhibit.render", "fail", f"Exhibit {item['key']}{where}: {'; '.join(problems)}", item["unit_id"])
+        else:
+            rendered += 1
+    if rendered:
+        _check(checks, "exhibit.render", "pass", f"{rendered} translated diagram(s) rendered and checked")
+    for exhibit in inventory:
+        for total in exhibit.get("checks", {}).get("totals", []):
+            if total["verdict"] == "mismatch" and exhibit["key"] not in corrected_keys:
+                _check(checks, "exhibit.totals", "warn",
+                       f"Exhibit {exhibit['key']} (page {exhibit['page']}): {total['column']} total {total['stated']} "
+                       f"but its rows sum to {total['sum_of_rows']}; correct it with a translator's note "
+                       "(source_error_corrected) or confirm the printed value")
+    if "exhibits" in config.get("execution", {}).get("checkpoints", []):
+        # The exhibit review lists every exhibit left as it was among its flags.
+        _exhibit_review_checks(project, config, checks)
+        return
+    log_path = project / "analysis" / "exhibit-retrofit-log.json"
+    if log_path.is_file():
+        left = [f"{d['key']}" + (f"/{d['part']}" if d["part"] > 1 else "")
+                for d in load_json(log_path)["decisions"] if d["status"] in {"unmatched", "untouched", "needs_hand_rebuild"}]
+        if left:
+            _check(checks, "exhibit.review", "warn",
+                   f"{len(left)} exhibit(s) keep their earlier treatment and need review: {', '.join(left)}")
+
+
 def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     manifest = load_manifest(project)
     state = load_state(project)
@@ -552,6 +802,8 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
     unit_position = {entry["unit_id"]: index for index, entry in enumerate(ordered_units)}
     target_tokens_by_unit: dict[str, Counter[str]] = {}
     source_tokens_by_unit: dict[str, Counter[str]] = {}
+    term_units: list[tuple[str, str | None, str, str]] = []
+    corrected_keys: set[str] = set()
     for entry in ordered_units:
         source_file = safe_project_path(project, entry["source_file"])
         target_file = _target_path(project, entry, require_edit)
@@ -604,6 +856,9 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             _check(checks, "observation.invalid", "fail", str(exc), unit_id)
 
         _coverage_checks(checks, unit_id, source, target, observation)
+        numbers_target = _exhibit_unit_checks(checks, unit_id, source, target, observation)
+        corrections = _declared_corrections(observation)
+        corrected_keys.update(key for _printed, _corrected, key in corrections)
         if record.get("status") not in {"completed", "skipped_approved"}:
             _check(checks, "unit.status", "fail",
                    f"Unit status is {record.get('status', 'missing')!r}; run plan and complete it", unit_id)
@@ -641,9 +896,10 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
             _check(checks, "structure.code_fences", "fail", "Code fence count changed", unit_id)
 
         source_numbers = _number_tokens(source)
-        target_numbers = _number_tokens(target)
+        # A declared misprint correction is the one number change QA accepts.
+        target_numbers = _corrected_back(_number_tokens(numbers_target), corrections)
         if source_numbers != target_numbers:
-            status, message = _variation_status("content.numbers", unit_id, source, target, observation)
+            status, message = _variation_status("content.numbers", unit_id, source, numbers_target, observation)
             if status == "fail":
                 # Exhibit reconstructions can move numeric anchors (a table
                 # rebuilt beside its caption) into the adjacent unit.  A real
@@ -675,12 +931,24 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
         for term in select_entries(glossary, source, entry["book_node_id"]):
             if not target_matches(term, target):
                 _check(checks, "terminology.approved", "fail", f"Approved target missing for {term['source']!r}: {term['target']!r}", unit_id)
+        term_units.append((unit_id, entry["book_node_id"], source, target))
+        leaked = [line.strip()[:80] for line in target.splitlines() if TOOL_TEXT_RE.match(line)]
+        if leaked:
+            _check(checks, "content.tool_text", "fail",
+                   f"Tool output leaked into the translation (it would print in the book): {leaked[0]!r}"
+                   + (f" (+{len(leaked) - 1} more)" if len(leaked) > 1 else ""), unit_id)
+        if has_translator_note(source, target):
+            _check(checks, "content.translator_note", "warn",
+                   "Target prose comments on extraction or OCR problems; a reader should see the book, not the tooling", unit_id)
 
         draft_path = safe_project_path(project, entry["draft_file"])
         if require_edit and draft_path.is_file():
             recorded_input = record.get("output_hashes", {}).get("edit_input_draft")
             if recorded_input != sha256_file(draft_path):
                 _check(checks, "edit.stale", "fail", "Edited output was not recorded against the current draft", unit_id)
+
+    _glossary_coverage_checks(checks, glossary, term_units)
+    _exhibit_book_checks(project, config, checks, corrected_keys)
 
     target_root = project / "target" / ("edited" if require_edit else "draft")
     actual_files = {portable_path(path, project): path for path in target_root.glob("unit-*.md")}

@@ -137,6 +137,12 @@ CAPTION_IMAGE_LINES = 4
 
 def _caption_images(project: Path, text: str, caption_line: str) -> tuple[Counter[str], list[str]]:
     """Real image assets beside one caption, not reaching past a neighbouring caption; missing files apart."""
+    # A figure-label block sits between a diagram and its caption but is dropped at
+    # publication, so it must not push the image out of reach.
+    from .retrofit import exhibit_blocks  # imported here: retrofit imports this module
+    for block in reversed([b for b in exhibit_blocks(text) if b["kind"] == "figure-labels"]):
+        start, end = block["span"]
+        text = text[:start] + text[end:]
     lines = text.splitlines()
     nearby: list[str] = []
     for position, line in enumerate(lines):
