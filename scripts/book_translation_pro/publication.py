@@ -1150,6 +1150,109 @@ def _normalize_structure(lines: list[str]) -> list[str]:
     return result
 
 
+def _fragment_image(project: Path, src: str) -> bool:
+    """A local image too narrow to be a picture (a converter's sliver of a drawing)."""
+    from PIL import Image
+
+    from .figures import FRAGMENT_IMAGE_MIN_SIDE
+
+    try:
+        with Image.open(safe_project_path(project, src.replace("\\", "/"))) as image:
+            return min(image.size) < FRAGMENT_IMAGE_MIN_SIDE
+    except (BTPError, OSError, ValueError):
+        return False  # a missing image stays visible to the normal resource checks
+
+
+def _title_like(line: str) -> bool:
+    """A running head reads as a title ("Obstacles to Lean Accountancy 179"); a sentence
+    that happens to open with the page number ("160 units were sold.") does not."""
+    words = [word for word in re.findall(r"[^\W\d_]+", _plain(line)) if word.isascii()]
+    if _plain(line).rstrip().endswith("."):
+        return False
+    return not words or sum(word[0].isupper() for word in words) * 2 >= len(words)
+
+
+def _has_content(line: str) -> bool:
+    return bool(re.search(r"!\[|<img\b|\w", re.sub(r"<(?!img\b)[^>]*>", "", line, flags=re.IGNORECASE)))
+
+
+def clean_bilingual_side(project: Path, text: str) -> str:
+    """One side of a bilingual unit without print residue the clean master never ships:
+    print stamps and the running folio after them, and converter slivers of drawings
+    (raw ``<img>`` too narrow to be a picture).  A real picture left as raw ``<img>``
+    becomes a Markdown image, so the DOCX writer keeps it.  A line that still holds
+    text or an image is never dropped."""
+    out: list[str] = []
+    page: str | None = None
+    for line in text.splitlines():
+        original = line
+        stamps = list(PRINT_MARKER_RE.finditer(line))
+        if stamps:
+            page = stamps[-1].group("page")
+            line = PRINT_MARKER_RE.sub("", line)
+        if _is_running_folio(line, page) and _title_like(line):
+            continue
+
+        def image(match: re.Match[str]) -> str:
+            src = re.search(r"""\bsrc\s*=\s*["']([^"']+)["']""", match.group(0))
+            if not src:
+                return match.group(0)
+            return "" if _fragment_image(project, src.group(1)) else f"![]({src.group(1).replace(chr(92), '/')})"
+
+        line = HTML_IMAGE_TAG_RE.sub(image, line)
+        if line != original and not _has_content(line):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def _source_stand_in(project: Path, target: str, shown: set[str]) -> str:
+    """For a source side left empty (it was only slivers of a drawing) beside a real
+    translation: the exhibit's original picture, the first time that exhibit comes up;
+    after that a blank paragraph, so the pair still renders."""
+    from .figures import _caption_key, _caption_matches, _figure_asset_name
+
+    for line in target.splitlines():
+        for match in _caption_matches(line):
+            asset = f"assets/original/images/{_figure_asset_name(_caption_key(match.group(1)))}"
+            if asset not in shown and (project / asset).is_file():
+                shown.add(asset)
+                return f"![]({asset})"
+    return " "
+
+
+def bilingual_items(project: Path, items: list[dict[str, Any]], publisher: Any) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """The alignment items a bilingual edition shows, with each side cleaned, and the
+    units it leaves out (with the reason).  A unit whose translation is only a comment
+    (its content rebuilt elsewhere, or dropped by decision) is left out, as the clean
+    master leaves it out."""
+    kept: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    shown: set[str] = set()
+    for item in _without_trailing_recovery(sorted(items, key=lambda row: row["order"])):
+        source = clean_bilingual_side(project, publisher.source(item["source_text"]))
+        target = clean_bilingual_side(project, publisher.target(item["target_text"]))
+        if not HTML_COMMENT_RE.sub("", target).strip():
+            skipped.append({"unit_id": item["unit_id"], "reason": "translation holds only a comment"})
+            continue
+        if not source:
+            source = _source_stand_in(project, target, shown)
+        kept.append(dict(item, source_text=source, target_text=target))
+    return kept, skipped
+
+
+def _without_trailing_recovery(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Alignment items up to the extraction-only recovery units appended after the book."""
+    titles = {title.casefold() for title in TRAILING_RECOVERY_TITLES}
+    for index in range(len(items) // 2, len(items)):
+        for side in ("source_text", "target_text"):
+            first = next((line for line in items[index][side].splitlines() if line.strip()), "")
+            heading = HEADING_RE.match(first.strip())
+            if heading and _plain(heading.group(2)).casefold() in titles:
+                return items[:index]
+    return items
+
+
 def _strip_trailing_recovery_material(lines: list[str]) -> list[str]:
     """Drop extraction-only recovery units appended after the real book."""
     midpoint = len(lines) // 2
@@ -3082,10 +3185,8 @@ def typeset_outputs(project: Path, config: dict[str, Any], output_dir: Path) -> 
     if "bilingual" in requested:
         alignment = create_segment_alignment(project, config)
         # Translated diagrams on the target side; the original side keeps the source image.
-        publisher = ExhibitPublisher(project, config)
-        for item in sorted(alignment["items"], key=lambda row: row["order"]):
-            item["source_text"] = publisher.source(item["source_text"])
-            item["target_text"] = publisher.target(item["target_text"])
+        alignment["items"], left_out = bilingual_items(project, alignment["items"], ExhibitPublisher(project, config))
+        alignment["skipped_units"] = alignment.get("skipped_units", []) + left_out
         bilingual_markdown = output_dir / "book-bilingual.md"
         render_bilingual_markdown(alignment, bilingual_markdown)
         bilingual_text = bilingual_markdown.read_text(encoding="utf-8")

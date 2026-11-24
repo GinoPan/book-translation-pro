@@ -80,6 +80,11 @@ STRUCTURED_RECONSTRUCTION_PREFIXES = (
 )
 
 
+# An image this narrow (pixels, shorter side) is a sliver an EPUB converter cut from a
+# vector drawing, not a picture.
+FRAGMENT_IMAGE_MIN_SIDE = 32
+
+
 def _meaningful_image_refs(project: Path, markdown: str) -> Counter[str]:
     """Return only image references whose local payload is a real visual."""
     refs = Counter(IMAGE_RE.findall(markdown))
@@ -92,7 +97,7 @@ def _meaningful_image_refs(project: Path, markdown: str) -> Counter[str]:
         try:
             resource = safe_project_path(project, ref.replace("\\", "/"))
             with Image.open(resource) as image:
-                if min(image.size) < 32:
+                if min(image.size) < FRAGMENT_IMAGE_MIN_SIDE:
                     continue
         except (BTPError, OSError, ValueError):
             # Keep missing resources in the inventory; the normal resource
