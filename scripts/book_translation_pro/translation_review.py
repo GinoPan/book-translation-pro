@@ -43,6 +43,7 @@ def default_status() -> tuple[str, str]:
 # --- what there is to review -------------------------------------------------------------
 
 STRETCH_MIN_UNITS = 5        # a chapter this long is sampled on its own; shorter ones together
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
 
 def _chapters(project: Path) -> dict[str, str]:
@@ -122,9 +123,13 @@ def translated_units(project: Path, config: dict[str, Any]) -> list[dict[str, An
         source_path = safe_project_path(project, entry["source_file"])
         source = source_path.read_text(encoding="utf-8")
         observation_path = safe_project_path(project, entry["observation_file"])
+        target = target_path.read_text(encoding="utf-8")
         out.append({
             "unit_id": entry["unit_id"], "chapter": chapters.get(entry["book_node_id"], entry["book_node_id"]),
-            "source": source, "target": target_path.read_text(encoding="utf-8"),
+            "source": source, "target": target,
+            # A unit whose translation holds no reader text (an omitted index, an exhibit
+            # rebuilt in another unit) has nothing to read; its note is checked by QA.
+            "placeholder": not _COMMENT_RE.sub("", target).strip(),
             "observation": load_json(observation_path) if observation_path.is_file() else {},
             # Table cells are source words too, as in the length check.
             "source_words": round(sum(map(_weight, _prose(source) + _table_cells(source)))),
@@ -140,13 +145,17 @@ def translated_units(project: Path, config: dict[str, Any]) -> list[dict[str, An
 def _signals(units: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, list[str]]:
     """Why the rule checks point at a unit: reasons to read it first.  Names rendered two
     ways are a book-level question for the reviewer's consistency pass, not unit picks."""
-    from .quality import profile_for, repeated_text, typography_issues, unit_signals
+    from .quality import note_marker_gaps, profile_for, repeated_text, split_fragments, typography_issues, unit_signals
 
     profile = profile_for(config["target"]["language"])
     reasons: dict[str, list[str]] = {u["unit_id"]: unit_signals(u["source"], u["target"], profile) for u in units}
     quads = [(u["unit_id"], u["source"], u["target"], u["observation"]) for u in units]
     for finding in repeated_text(quads):
         reasons[finding["unit_id"]].append(f"repeated text {finding['where']}")
+    for gap in note_marker_gaps(quads):
+        reasons[gap["unit_id"]].append(f"{gap['source']} note markers in the source, {gap['target']} in the translation")
+    for fragment in split_fragments(quads):
+        reasons[fragment["unit_id"]].append(f"sentence fragment at the {fragment['where']}")
     if profile:
         for u in units:
             if typography_issues(u["target"], profile):
@@ -157,14 +166,24 @@ def _signals(units: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, l
 def select_units(units: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, list[str]]:
     """unit_id → why it is reviewed, in reading order."""
     quality = config["quality"]
+    readable = [u for u in units if not u["placeholder"]]
     if quality["review_scope"] == "all":
-        return {u["unit_id"]: ["full review"] for u in units}
-    signals = _signals(units, config)
-    by_stretch: dict[str, list[str]] = {}
+        return {u["unit_id"]: ["full review"] for u in readable}
+    signals = _signals(readable, config)
+    by_stretch: dict[str, list[dict[str, Any]]] = {}
     for u in units:
-        by_stretch.setdefault(u["chapter"], []).append(u["unit_id"])
-    sampled = {unit_id for ids in by_stretch.values()
-               for unit_id in _evenly(ids, math.ceil(quality["review_sample_share"] * len(ids)))}
+        by_stretch.setdefault(u["chapter"], []).append(u)
+    sampled: set[str] = set()
+    for members in by_stretch.values():
+        # Spaced over every unit, so the picks do not move when a unit becomes a
+        # placeholder; a pick that is one moves to the nearest readable unit.
+        ids = [u["unit_id"] for u in members]
+        options = [u["unit_id"] for u in members if not u["placeholder"]]
+        for pick in _evenly(ids, math.ceil(quality["review_sample_share"] * len(ids))):
+            nearest = sorted((o for o in options if o not in sampled), key=lambda o: abs(ids.index(o) - ids.index(pick)))
+            if nearest:
+                sampled.add(pick if pick in options and pick not in sampled else nearest[0])
+    units = readable
     chosen = {}
     for u in units:
         why = (["sample of its part of the book"] if u["unit_id"] in sampled else []) + signals[u["unit_id"]]
@@ -205,7 +224,7 @@ def build_translation_review(project: Path, config: dict[str, Any]) -> dict[str,
         weak = {name for name, chapter in score(recorded, config["quality"]["max_penalty_per_1000_words"])["chapters"].items()
                 if chapter["needs_full_review"]}
         for u in units:
-            if u["chapter"] in weak:
+            if u["chapter"] in weak and not u["placeholder"]:
                 chosen.setdefault(u["unit_id"], []).append("its part of the book scored above the bar")
     items = []
     for u in units:
@@ -223,6 +242,8 @@ def build_translation_review(project: Path, config: dict[str, Any]) -> dict[str,
         items.append(item)
     chapters: dict[str, dict[str, int]] = {}
     for u in units:
+        if u["placeholder"]:
+            continue
         chapter = chapters.setdefault(u["chapter"], {"units": 0, "source_words": 0})
         chapter["units"] += 1
         chapter["source_words"] += u["source_words"]
@@ -307,6 +328,9 @@ def record_translation_review(project: Path, config: dict[str, Any], source: Pat
     if stale:
         raise BTPError("The review does not match the current translation (re-run translation-review): " + ", ".join(stale[:10]))
     atomic_write_json(project / RECORD, review)
+    # The review file becomes the recorded review, so the work a rebuild carries over
+    # from it is never older than the record (a reviewer may judge a copy elsewhere).
+    atomic_write_json(project / TEMPLATE, review)
     write_overview(project, config, review)
     result = score(review, config["quality"]["max_penalty_per_1000_words"])
     return {"recorded": "translation-review", "path": RECORD, "units": len(review["items"]),
@@ -384,10 +408,11 @@ PROPOSAL_MIN_COUNT = 3
 
 
 def rule_proposals(projects: list[Path], min_count: int = PROPOSAL_MIN_COUNT, output: Path | None = None) -> dict[str, Any]:
-    """Group the findings of recorded reviews, across books, by category and cause.  A cause
-    found at least ``min_count`` times is proposed as a rule: a new check, or a line in the
-    translation protocol or style guide.  A person decides; nothing is changed here."""
-    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    """Group the findings of recorded reviews, across books, by cause (a cause such as
+    term-not-in-glossary shows up under more than one category).  A cause found at least
+    ``min_count`` times is proposed as a rule: a new check, or a line in the translation
+    protocol or style guide.  A person decides; nothing is changed here."""
+    groups: dict[str, dict[str, Any]] = {}
     books = []
     for project in projects:
         path = project / RECORD
@@ -399,9 +424,11 @@ def rule_proposals(projects: list[Path], min_count: int = PROPOSAL_MIN_COUNT, ou
             for finding in item["findings"]:
                 if finding["status"] == "dismissed":
                     continue
-                group = groups.setdefault((finding["category"], finding["cause"]), {
-                    "category": finding["category"], "cause": finding["cause"], "count": 0,
+                group = groups.setdefault(finding["cause"], {
+                    "cause": finding["cause"], "categories": [], "count": 0,
                     "weight": 0, "books": [], "examples": []})
+                if finding["category"] not in group["categories"]:
+                    group["categories"].append(finding["category"])
                 group["count"] += 1
                 group["weight"] += SEVERITY_WEIGHTS[finding["severity"]]
                 if project.name not in group["books"]:
@@ -412,7 +439,8 @@ def rule_proposals(projects: list[Path], min_count: int = PROPOSAL_MIN_COUNT, ou
                                               "target": finding["target_excerpt"][:200], "note": finding["note"]})
     proposals = []
     for group in sorted(groups.values(), key=lambda g: (-g["weight"], -g["count"])):
-        covered = COVERED_BY.get(group["category"], [])
+        covered = [check for category in group["categories"] for check in COVERED_BY.get(category, [])]
+        covered = list(dict.fromkeys(covered))
         group["existing_checks"] = covered
         group["proposal"] = group["count"] >= min_count
         group["suggestion"] = (
@@ -429,14 +457,14 @@ def rule_proposals(projects: list[Path], min_count: int = PROPOSAL_MIN_COUNT, ou
              f"A cause found {min_count} or more times is proposed as a rule. A person decides; the tool changes nothing.", ""]
     for group in proposals:
         mark = "PROPOSED" if group["proposal"] else "watch"
-        lines += [f"## {mark}: {group['category']} / {group['cause']}", "",
+        lines += [f"## {mark}: {group['cause']} ({', '.join(group['categories'])})", "",
                   f"{group['count']} finding(s), weight {group['weight']}, in {', '.join(group['books'])}. "
                   f"Suggestion: {group['suggestion']}.", ""]
         for example in group["examples"]:
             lines.append(f"- {example['book']} {example['unit_id']}: {example['source']!r} → {example['target']!r} ({example['note']})")
         lines.append("")
     atomic_write_text(out_dir / "rule-proposals.md", "\n".join(lines))
-    return {"books": books, "groups": len(proposals), "proposed": [f"{g['category']}/{g['cause']}" for g in proposals if g["proposal"]],
+    return {"books": books, "groups": len(proposals), "proposed": [g["cause"] for g in proposals if g["proposal"]],
             "report": str(out_dir / "rule-proposals.md")}
 
 

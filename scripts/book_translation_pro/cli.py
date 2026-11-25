@@ -169,6 +169,9 @@ def _unit_exhibits(project: Path, source_text: str) -> list[dict[str, Any]]:
     return out
 
 
+REVIEW_EDGE_CHARS = 600
+
+
 def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
     config, _ = load_resolved_project(project)
     manifest = load_manifest(project)
@@ -245,6 +248,17 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
         payload["review_file"] = str(template)
         payload["review_reasons"] = item["reasons"]
         payload["earlier_findings"] = item["findings"]
+
+        # Translators move a sentence split by a page break to one side of the join;
+        # the reviewer needs both edges to tell a moved sentence from a dropped one.
+        def edge(offset: int) -> str:
+            if not 0 <= index + offset < len(ordered):
+                return ""
+            path = safe_project_path(project, ordered[index + offset][target_field])
+            text = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+            return text[-REVIEW_EDGE_CHARS:] if offset < 0 else text[:REVIEW_EDGE_CHARS]
+
+        payload["neighbour_targets"] = {"previous_end": edge(-1), "next_start": edge(1)}
     if phase == "translate":
         payload["dependency_hashes"] = dispatch_unit(project, unit_id)
     return payload

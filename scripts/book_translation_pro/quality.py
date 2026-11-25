@@ -38,6 +38,8 @@ PROFILES: dict[str, dict[str, Any]] = {
             "doubled_punctuation": re.compile(r"([，。；：、！？])\1|[，；：、][，。；：、]|。[，；：、]"),
             # A space between two Chinese characters (an extraction or typing slip).
             "space_between_characters": re.compile(rf"[{CJK}] +(?=[{CJK}])"),
+            # Zero-width characters: invisible on the page, but they split words for search and wrapping.
+            "invisible_characters": re.compile("[​-‍⁠﻿]"),
         },
         "paired": (("“", "”"), ("（", "）"), ("《", "》")),
         # Expected sentences in the target per source sentence; below this the unit is
@@ -126,11 +128,18 @@ def repeated_text(units: list[Unit]) -> list[dict[str, Any]]:
     return findings
 
 
+_LABEL_BLOCK_RE = re.compile(r"<!--\s*btp:figure-labels.*?<!--\s*/btp:figure-labels\s*-->", re.S)
+_AUTOLINK_RE = re.compile(r"<(?:https?|ftp|mailto):[^>\s]+>")
+
+
 def typography_issues(target: str, profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Typography slips by kind, with a count and the first example."""
+    """Typography slips by kind, with a count and the first example.  Diagram labels
+    (spaced to fit a drawing) are left out, and a bare link counts as a word, so the
+    punctuation on either side of a removed URL is not read as doubled."""
     from .qa import _table_cells
 
     issues: dict[str, dict[str, Any]] = {}
+    target = _AUTOLINK_RE.sub(" URL ", _LABEL_BLOCK_RE.sub("", target))
     text = "\n".join(_prose(target) + _table_cells(target))
     for kind, pattern in profile["typography"].items():
         found = [match.group(0) for match in pattern.finditer(text)]
@@ -142,6 +151,80 @@ def typography_issues(target: str, profile: dict[str, Any]) -> dict[str, dict[st
                 "count": abs(text.count(opening) - text.count(closing)),
                 "example": f"{text.count(opening)} {opening} / {text.count(closing)} {closing}"}
     return issues
+
+
+_QUOTE_RE = re.compile(r"^[>\s*_]+|[\s*_]+$")
+_SOURCE_ELLIPSIS = ("...", "…", ". . .")
+
+
+def _edge_blocks(markdown: str) -> tuple[str, str]:
+    blocks = [_QUOTE_RE.sub("", block) for block in _prose(markdown)]
+    blocks = [block for block in blocks if block]
+    return (blocks[0], blocks[-1]) if blocks else ("", "")
+
+
+def split_fragments(units: list[Unit]) -> list[dict[str, Any]]:
+    """Units whose translation ends or starts with an ellipsis the source does not have:
+    a sentence split by a page break left as two fragments (……) instead of one
+    sentence in one unit."""
+    out = []
+    for unit_id, source, target, _observation in units:
+        source_first, source_last = _edge_blocks(source)
+        target_first, target_last = _edge_blocks(target)
+        if target_last.endswith(("……", "…")) and not source_last.rstrip(" ”\"’)").endswith(_SOURCE_ELLIPSIS):
+            out.append({"unit_id": unit_id, "where": "end", "example": target_last[-40:]})
+        if target_first.startswith(("……", "…")) and not source_first.startswith(_SOURCE_ELLIPSIS):
+            out.append({"unit_id": unit_id, "where": "start", "example": target_first[:40]})
+    return out
+
+
+_HEADING_LINE_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.M)
+_SENTENCE_STOP = ("。", "！", "？", ".", "!", "?")
+HEADING_PARAGRAPH_WEIGHT = 40   # about 67 Chinese characters; chapter titles stay far below
+
+
+def heading_paragraphs(markdown: str) -> list[str]:
+    """Markdown headings that are really paragraphs: long text ending in a full stop
+    (extraction marks a paragraph as a heading, and a translation keeps the markup)."""
+    found = []
+    for match in _HEADING_LINE_RE.finditer(markdown):
+        text = re.sub(r"<[^>]+>|[*_`]", "", match.group(2)).strip()
+        if text.rstrip("”’\"）)").endswith(_SENTENCE_STOP) and _weight(text) >= HEADING_PARAGRAPH_WEIGHT:
+            found.append(text[:40])
+    return found
+
+
+# Note markers as extraction writes them (^8^, <sup>8</sup>, [^8]) and as a translation may
+# (digits right after full-width punctuation, superscript digits).
+_SOURCE_NOTE_RE = re.compile(r"\^\d{1,3}\^|<sup>\s*\d{1,3}\s*</sup>|\[\^[^\]]+\](?!:)")
+_TARGET_NOTE_RE = re.compile(r"\^\d{1,3}\^|<sup>\s*\d{1,3}\s*</sup>|\[\^[^\]]+\](?!:)|[⁰¹²³⁴⁵⁶⁷⁸⁹]+"
+                             r"|(?<=[。，；：！？”）])\d{1,3}(?![\d.]|\s*[年月日%])")
+
+
+def note_markers(source: str, target: str) -> tuple[int, int]:
+    """Note markers counted in the source and in the target, on the comparison text
+    (which writes superscript spans as ^8^)."""
+    from .qa import _comparison_text
+
+    def count(pattern: re.Pattern[str], text: str) -> int:
+        # A marker that starts a line opens the note's own text, not a reference to it.
+        return sum(1 for m in pattern.finditer(text) if m.start() and text[m.start() - 1] != "\n")
+
+    return count(_SOURCE_NOTE_RE, _comparison_text(source)), count(_TARGET_NOTE_RE, _comparison_text(target))
+
+
+def note_marker_gaps(units: list[Unit]) -> list[dict[str, Any]]:
+    """Units with fewer note markers in the translation than in the source, counted
+    over the unit and its neighbours, so a marker that moved with its sentence across
+    a join is not a gap."""
+    counts = [note_markers(source, target) for _unit_id, source, target, _observation in units]
+    out = []
+    for index, (unit_id, *_rest) in enumerate(units):
+        source_notes, target_notes = counts[index]
+        window = counts[max(0, index - 1):index + 2]
+        if source_notes > target_notes and sum(c[0] for c in window) > sum(c[1] for c in window):
+            out.append({"unit_id": unit_id, "source": source_notes, "target": target_notes})
+    return out
 
 
 _NAME_RE = re.compile(r"(?<=[a-z,;] )([A-Z][a-z]{2,})\b")
@@ -168,15 +251,20 @@ def name_consistency(units: list[Unit], covered: Iterable[dict[str, Any]] = ()) 
     """Names printed in English in some units and not in others.  Names that a glossary or
     ledger entry covers are left to that entry's own check."""
     covered = list(covered)
+    # Units kept in the source language by design, and placeholders with no reader text
+    # (an omitted index mentions every name but translates none), are left out.
     texts = [(unit_id, "\n".join(_prose(source)), "\n".join(_prose(target)))
              for unit_id, source, target, observation in units
-             if not any(str(issue).startswith("untranslated_by_design") for issue in observation.get("source_issues", []))]
+             if not any(str(issue).startswith("untranslated_by_design") for issue in observation.get("source_issues", []))
+             and re.sub(r"<!--.*?-->", "", target, flags=re.S).strip()]
     out = []
     for name in name_candidates([source for _, source, _ in texts]):
         if any(entry_matches(entry, name) for entry in covered):
             continue
         pattern = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
-        mentioning = [(unit_id, target) for unit_id, source, target in texts if pattern.search(source)]
+        # Bylines and headings print names in capitals (DR. C. J. MCNAIR).
+        in_source = re.compile(rf"(?<![\w-])(?:{re.escape(name)}|{re.escape(name.upper())})(?![\w-])")
+        mentioning = [(unit_id, target) for unit_id, source, target in texts if in_source.search(source)]
         if len(mentioning) < NAME_MIN_UNITS:
             continue
         english = [unit_id for unit_id, target in mentioning if pattern.search(_gloss_free(target, name))]
@@ -275,6 +363,23 @@ def quality_checks(check: Any, units: list[Unit], config: dict[str, Any], glossa
         check("content.repeated_text", "fail",
               f"{finding['count']} sentence(s) repeated {finding['where']} where the source has no repeat; "
               f"first: {finding['example']!r}", finding["unit_id"])
+    fragments = split_fragments(units)
+    for finding in fragments:
+        check("content.split_sentence", "warn",
+              f"The translation {'ends' if finding['where'] == 'end' else 'starts'} with an ellipsis the source does not "
+              f"have ({finding['example']!r}): a sentence split by a page break; translate it whole in one unit",
+              finding["unit_id"])
+    notes = note_marker_gaps(units)
+    for gap in notes:
+        check("content.note_markers", "warn",
+              f"{gap['source']} note marker(s) in the source, {gap['target']} in the translation (neighbouring units "
+              "included); a note reference may have been dropped", gap["unit_id"])
+    for unit_id, _source, target, _observation in units:
+        headings = heading_paragraphs(target)
+        if headings:
+            check("structure.heading_paragraph", "warn",
+                  f"{len(headings)} heading(s) read as paragraphs (long, ending in a full stop), first {headings[0]!r}; "
+                  "remove the heading markup", unit_id)
     typography: dict[str, Any] = {}
     if profile:
         for unit_id, _source, target, _observation in units:
@@ -309,4 +414,4 @@ def quality_checks(check: Any, units: list[Unit], config: dict[str, Any], glossa
         check("terminology.ledger_entries", "warn",
               f"{ledger['skipped']} observation new_entries were not usable (each needs source, target, and category)")
     return {"profile": profile["name"] if profile else None, "typography": typography, "names": names,
-            "repeated_text": repeats}
+            "repeated_text": repeats, "split_sentences": fragments, "note_marker_gaps": notes}

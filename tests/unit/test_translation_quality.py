@@ -12,10 +12,13 @@ from book_translation_pro.glossary import build_ledger, ledger_for_unit, new_ent
 from book_translation_pro.qa import run_qa
 from book_translation_pro.quality import (
     PROFILES,
+    heading_paragraphs,
     ledger_checks,
     name_consistency,
+    note_marker_gaps,
     profile_for,
     repeated_text,
+    split_fragments,
     term_candidates,
     typography_issues,
 )
@@ -60,6 +63,19 @@ class TypographyTests(unittest.TestCase):
     def test_table_cells_are_checked_too(self) -> None:
         table = "| 项目 | 说明 |\n|---|---|\n| 成本 | 直接人工,间接费用 |\n"
         self.assertIn("half_width_punctuation", typography_issues(table, ZH))
+
+    def test_invisible_characters_are_reported(self) -> None:
+        self.assertEqual(typography_issues("## 8.4　管理会计的重大​​发展\n", ZH)["invisible_characters"]["count"], 2)
+        self.assertNotIn("invisible_characters", typography_issues("## 8.4　管理会计的重大发展\n", ZH))
+
+    def test_diagram_labels_and_removed_links_are_not_slips(self) -> None:
+        labels = ("<!-- btp:figure-labels exhibit=\"10.3\" -->\n1. 节拍时间 _____ 秒   周期时间 ______ 秒\n"
+                  "<!-- /btp:figure-labels -->\n\n")
+        link = "参见研究小组：<http://www.example.org>；《系统智能》（2005）。\n"
+        self.assertEqual(typography_issues(labels + link, ZH), {})
+        # The same slips in prose are still found.
+        self.assertIn("space_between_characters", typography_issues("节拍时间 秒   周期时间。\n", ZH))
+        self.assertIn("doubled_punctuation", typography_issues("参见研究小组：；《系统智能》。\n", ZH))
 
     def test_correct_text_and_mixed_scripts_are_left_alone(self) -> None:
         clean = ("图表 4.6 显示了价值流成本。Lean Accounting, 2nd edition 是一本书。\n\n"
@@ -142,6 +158,18 @@ class NameConsistencyTests(unittest.TestCase):
     def test_a_name_with_a_glossary_or_ledger_entry_is_left_to_that_check(self) -> None:
         covered = [{"source": "Deming", "aliases": []}]
         self.assertEqual(name_consistency(_named_units(2, 3), covered), [])
+
+    def test_placeholder_units_are_left_out(self) -> None:
+        units = _named_units(2, 1)
+        units += [_unit(f"unit-009{n}", "Index: Deming, 5. Deming, Edwards, 7.", "<!-- 原书索引已略去。 -->") for n in range(3)]
+        self.assertEqual(name_consistency(units), [])
+
+    def test_a_name_printed_in_capitals_counts_as_a_mention(self) -> None:
+        units = _named_units(2, 1)
+        units.append(_unit("unit-0099", "W. EDWARDS DEMING\n\nOn Quality.\n", "W. 爱德华兹·戴明\n\n论质量。\n"))
+        [item] = name_consistency(units)
+        self.assertEqual((item["name"], len(item["translated"])), ("Deming", 2))
+        self.assertIn("unit-0099", item["translated"])
 
     def test_units_kept_in_the_source_language_by_design_are_left_out(self) -> None:
         units = _named_units(2, 3)
@@ -240,8 +268,11 @@ class BenchmarkPlantTests(unittest.TestCase):
         self.assertIsNone(repeat_join("新的单元开始了。", self.SOURCE, None))
 
 
-def _translated_project(root: Path, targets: list[str]) -> dict:
-    config, _ = make_project(root, unit_count=len(targets))
+def _translated_project(root: Path, targets: list[str], sources: dict[str, str] | None = None,
+                        with_term: bool = False) -> dict:
+    config, _ = make_project(root, with_term=with_term, unit_count=len(targets))
+    for unit_id, text in (sources or {}).items():
+        atomic_write_text(root / "source-work" / "work-units" / f"{unit_id}.md", text)
     record_review(root, "terminology", True, "tester", "approved")
     for number, text in enumerate(targets, 1):
         unit_id = f"unit-{number:04d}"
@@ -358,6 +389,26 @@ class TranslationReviewTests(unittest.TestCase):
             # Changed since it was judged: back to pending, its finding kept for the reviewer.
             self.assertEqual((items["unit-0003"]["verdict"], len(items["unit-0003"]["findings"])), ("pending", 1))
 
+    def test_a_review_judged_in_a_copy_is_what_a_rebuild_keeps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = _translated_project(root, self.TARGETS)
+            config["quality"]["review_scope"] = "all"
+            build_translation_review(root, config)
+            record_translation_review(root, config, _judge(root, {"unit-0002": ("findings", [_finding()])}))
+            atomic_write_text(root / "target" / "edited" / "unit-0002.md", "# 轴承 2\n\n轴承预紧为 20 毫米。\n")
+            build_translation_review(root, config)  # unit-0002 back to pending with its open finding
+            # The reviewer fixes it in a copy of the review file and records the copy.
+            copy = load_json(root / TEMPLATE)
+            for item in copy["items"]:
+                if item["unit_id"] == "unit-0002":
+                    item["verdict"], item["findings"][0]["status"] = "findings", "fixed"
+            atomic_write_json(root / "qa" / "copy.json", copy)
+            record_translation_review(root, config, root / "qa" / "copy.json")
+            build_translation_review(root, config)
+            item = next(i for i in load_json(root / TEMPLATE)["items"] if i["unit_id"] == "unit-0002")
+            self.assertEqual((item["verdict"], item["findings"][0]["status"]), ("findings", "fixed"))
+
     def test_table_cells_count_as_source_words(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -392,8 +443,45 @@ class TranslationReviewTests(unittest.TestCase):
             self.assertEqual(Path(package["review_file"]), root / TEMPLATE)
             self.assertEqual((package["review_reasons"], package["earlier_findings"]),
                              (["sample of its part of the book"], []))
+            self.assertEqual(package["neighbour_targets"],
+                             {"previous_end": self.TARGETS[0].strip(), "next_start": self.TARGETS[2].strip()})
             with self.assertRaisesRegex(BTPError, "not among the units selected"):
                 show_unit(root, "unit-0001", "review")
+
+    def test_units_with_no_reader_text_are_not_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = _translated_project(root, self.TARGETS + ["<!-- 原书索引已略去，见译者注。 -->\n"])
+            config["quality"]["review_scope"] = "all"
+            build_translation_review(root, config)
+            review = load_json(root / TEMPLATE)
+            self.assertEqual([i["unit_id"] for i in review["items"]], ["unit-0001", "unit-0002", "unit-0003"])
+            self.assertEqual(sum(c["units"] for c in review["chapters"].values()), 3)
+
+    def test_a_sample_pick_on_a_placeholder_moves_to_its_nearest_readable_neighbour(self) -> None:
+        targets = [f"# 轴承 {n}\n\n轴承预紧为 {n * 10} mm。\n" for n in range(1, 11)]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = _translated_project(root, targets)
+            build_translation_review(root, config)
+            self.assertEqual([i["unit_id"] for i in load_json(root / TEMPLATE)["items"]], ["unit-0006"])
+        targets[5] = "<!-- 本单元内容已在 unit-0007 中重建。 -->\n"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = _translated_project(root, targets)
+            build_translation_review(root, config)
+            self.assertEqual([i["unit_id"] for i in load_json(root / TEMPLATE)["items"]], ["unit-0005"])
+
+    def test_a_hyphenated_glossary_term_missing_from_the_translation_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = _translated_project(root, ["# 轴承 1\n\n预紧为 10 mm。\n", *self.TARGETS[1:]],
+                                         {"unit-0001": "# Bearing 1\n\nbearing pre-load is 10 mm.\n"}, with_term=True)
+            checks = run_qa(root, config)["checks"]
+            self.assertEqual([c["unit_id"] for c in checks if c["id"] == "terminology.hyphenated"], ["unit-0001"])
+            # The selection (a dependency) is unchanged, so the unit's approved-term check does not fail.
+            self.assertNotIn(("terminology.approved", "unit-0001"),
+                             [(c["id"], c.get("unit_id")) for c in checks if c["status"] == "fail"])
 
     def test_publication_reviews_every_unit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -423,6 +511,55 @@ class TranslationReviewTests(unittest.TestCase):
         self.assertEqual(result["blocking_open"], [])
 
 
+class ReviewLessonCheckTests(unittest.TestCase):
+    """Checks added after the first real review (references/translation-quality.md)."""
+
+    def test_a_sentence_left_as_fragments_across_a_join_is_reported(self) -> None:
+        units = [_unit("unit-0001", "The chart shows the trend of manual entries made after", "> 会议上展示趋势图……\n"),
+                 _unit("unit-0002", "month-end close. We assign one person.", "> ……月结后编制的人工录入数量。\n")]
+        self.assertEqual([(f["unit_id"], f["where"]) for f in split_fragments(units)],
+                         [("unit-0001", "end"), ("unit-0002", "start")])
+
+    def test_an_ellipsis_the_source_has_is_left_alone(self) -> None:
+        units = [_unit("unit-0001", "He paused and said, “Well . . .”", "他停顿了一下，说：“嗯……”\n"),
+                 _unit("unit-0002", "...and then the line stopped.", "……然后生产线停了。\n"),
+                 _unit("unit-0003", "Lists go on. Value, flow, pull…", "清单还在继续：价值、流动、拉动……\n")]
+        self.assertEqual(split_fragments(units), [])
+
+    def test_a_paragraph_marked_as_a_heading_is_reported(self) -> None:
+        paragraph = "## " + "第 7 章讨论传统标准成本法给正在走向精益转型的企业带来的严重影响，" * 2 + "这一点十分重要。\n"
+        self.assertEqual(len(heading_paragraphs(paragraph)), 1)
+        quoted = "## " + "他说道：" + "精益转型需要每个人都参与进来并持续改善流程，" * 3 + "我从没见过他这么兴奋！”\n"
+        self.assertEqual(len(heading_paragraphs(quoted)), 1)
+
+    def test_real_headings_are_left_alone(self) -> None:
+        headings = ("# 1　精益困境：选择系统原则，还是管理会计控制——不能两者兼得\n\n"
+                    "## 3.3　实施精益战略需要什么？\n\n### （l）准备回答“这对我有什么好处？”\n\n"
+                    "## 1.2 Business Results: Mechanism Versus Life System.\n")
+        self.assertEqual(heading_paragraphs(headings), [])
+
+    def test_dropped_note_markers_are_reported(self) -> None:
+        units = [_unit("unit-0001", "They see it.^7^ Accountants agree.^8^ Fewer are needed.^9^",
+                       "他们看到了这一点。会计师同意。所需人员会减少。")]
+        self.assertEqual(note_marker_gaps(units), [{"unit_id": "unit-0001", "source": 3, "target": 0}])
+
+    def test_kept_moved_and_look_alike_markers(self) -> None:
+        units = [
+            # Kept as a digit after full-width punctuation, a superscript, or a note reference.
+            _unit("unit-0001", "It grew.^4^ It fell.^5^ It held.^6^", "它增长了。4它下降了。⁵它保持不变。[^6]"),
+            # Moved to the next unit with its sentence.
+            _unit("unit-0002", "Costs fell sharply.^7^", "成本大幅下降，"),
+            _unit("unit-0003", "Then the plant grew.", "这在当年就已显现。7随后工厂扩大了。"),
+        ]
+        self.assertEqual(note_marker_gaps(units), [])
+        # A note's own text starting with its number is not a second reference.
+        self.assertEqual(note_marker_gaps([_unit("unit-0001", "It grew. ^1^ More.\n\n^1^I am indebted to Esa Saarinen.",
+                                                 "它增长了。[^1] 更多。\n\n[^1]: 感谢 Esa Saarinen。")]), [])
+        # A year or a percentage after punctuation is not a marker.
+        self.assertEqual(note_marker_gaps([_unit("unit-0001", "Sales rose.^1^", "销售增长，2005 年为 12%。")]),
+                         [{"unit_id": "unit-0001", "source": 1, "target": 0}])
+
+
 class RuleProposalTests(unittest.TestCase):
     def test_causes_recurring_across_books_are_proposed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -437,12 +574,25 @@ class RuleProposalTests(unittest.TestCase):
                 atomic_write_json(project / RECORD, {"items": [{"unit_id": "unit-0001", "findings": findings}]})
                 books.append(project)
             result = rule_proposals(books, min_count=3, output=root)
-            self.assertEqual(result["proposed"], ["terminology.wrong_term/term-not-in-glossary"])
+            self.assertEqual(result["proposed"], ["term-not-in-glossary"])
             report = json.loads((root / "rule-proposals.json").read_text(encoding="utf-8"))
             top = report["groups"][0]
             self.assertEqual((top["count"], top["books"]), (3, ["book-a", "book-b"]))
             self.assertEqual(top["existing_checks"], ["terminology.approved"])
             self.assertNotIn("not-an-error", [g["cause"] for g in report["groups"]])
+
+    def test_a_cause_is_counted_across_categories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            findings = [dict(_finding("minor", "fixed"), category=category, cause="term-not-in-glossary")
+                        for category in ("terminology.wrong_term", "terminology.inconsistent", "terminology.inconsistent")]
+            atomic_write_json(root / "book" / RECORD, {"items": [{"unit_id": "unit-0001", "findings": findings}]})
+            result = rule_proposals([root / "book"], min_count=3, output=root)
+            self.assertEqual(result["proposed"], ["term-not-in-glossary"])
+            group = json.loads((root / "rule-proposals.json").read_text(encoding="utf-8"))["groups"][0]
+            self.assertEqual(group["categories"], ["terminology.wrong_term", "terminology.inconsistent"])
+            self.assertEqual(group["existing_checks"],
+                             ["terminology.approved", "terminology.ledger", "terminology.name_consistency"])
 
 
 class ConfigTests(unittest.TestCase):
