@@ -378,6 +378,7 @@ EXPANSION_WARN_RATIO = 2.0
 COPIED_BLOCK_MIN_WORDS = 6
 COPIED_SHARE_FAIL = 0.5
 EXCUSED_SHARE_WARN = 0.2
+_HYPHEN_JOIN_RE = re.compile(r"(?<=[A-Za-z])-(?=[A-Za-z])")
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?…])\s+|(?<=[。！？])")
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)])\s+", re.MULTILINE)
 
@@ -999,7 +1000,8 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
 
         term_source = _term_source(source)
         exempt = _term_exemptions(observation)
-        for term in select_entries(glossary, term_source, entry["book_node_id"]):
+        selected_terms = select_entries(glossary, term_source, entry["book_node_id"])
+        for term in selected_terms:
             if target_matches(term, target):
                 continue
             if term["id"] in exempt:
@@ -1007,6 +1009,14 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
                        f"Approved target for {term['source']!r} declared not applicable: {exempt[term['id']]}", unit_id)
             else:
                 _check(checks, "terminology.approved", "fail", f"Approved target missing for {term['source']!r}: {term['target']!r}", unit_id)
+        # A term the source prints hyphenated (Kan-Ban) escapes the glossary selection, which
+        # is a dependency and is left as it is; say so when the translation lacks the target.
+        selected_ids = {term["id"] for term in selected_terms}
+        for term in select_entries(glossary, _HYPHEN_JOIN_RE.sub("", term_source), entry["book_node_id"]):
+            if term["id"] not in selected_ids and term["id"] not in exempt and not target_matches(term, target):
+                _check(checks, "terminology.hyphenated", "warn",
+                       f"The source prints {term['source']!r} with a hyphen, so the unit's glossary selection missed it, "
+                       f"and the translation lacks {term['target']!r}", unit_id)
         term_units.append((unit_id, entry["book_node_id"], term_source, target))
         leaked = [line.strip()[:80] for line in target.splitlines() if TOOL_TEXT_RE.match(line)]
         if leaked:

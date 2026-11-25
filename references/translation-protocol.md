@@ -29,9 +29,15 @@ Use `show-unit --phase translate`. Read the source unit, Style Guide, approved G
 - Translate visible prose, headings, captions, safe alt text, and table language.
 - Follow approved Glossary targets within their scopes. Report conflicts instead of silently changing an approved term.
 - Follow `ledger_entries`: the renderings earlier units chose for names and terms the glossary lacks. Use the same rendering; when you believe it is wrong, keep it and report a conflict instead of starting a second one.
-- Render people, organizations, and places as the style guide's name policy (`names.policy`) says, the same way in every unit.
+- Render people, organizations, and places as the style guide's name policy (`names.policy`) says, the same way in every unit and in every place: body text, chapter bylines, headings, and lists of contributors. Citations keep the published form of author names and titles.
 - Use natural target-language syntax while preserving meaning, uncertainty, negation, qualifications, warnings, and authorial tone.
+- Translate idioms and culture-bound phrases by their meaning, not word for word: "is lost on most managers" (they do not grasp it), "a Chinese fire drill" (a chaotic scramble), "convert to English" (to plain language), "with the best of them". Keep a number inside a name exactly (`Fortune 50` is 《财富》50 强, never 五百强).
 - Translate every sentence of a long paragraph; a sentence dropped inside a paragraph is the omission no automatic check can see.
+- A sentence a page break splits across two units is translated whole, once, in one of the two units; never leave a fragment marked `……` on either side.
+- Keep heading markup only on headings. Extraction sometimes marks a paragraph as a heading (`## Chapter 7 addresses …`); translate it as a paragraph. Keep the heading levels the book already uses for its chapters and sections.
+- Keep every note marker (`^8^`, a superscript, `[^8]`) at the word it follows, including in sentences you restructure.
+- Formulas keep every term and operator; a divisor or denominator extraction set on its own line is still part of the formula.
+- Never add text the author did not write: no descriptions of charts, no notes about how the unit or a figure was produced. Notes for the next worker go in the observation or in an HTML comment.
 - Output only the translated unit to the expected draft file.
 
 Write an observation JSON beside it:
@@ -104,6 +110,8 @@ Read [translation-quality.md](translation-quality.md) first. The reviewer must n
 
 1. Run `translation-review <project>`. It writes `qa/translation-review/review.json` with the selected units, each with `reasons` (why it was chosen) and verdict `pending`.
 2. For each unit, run `show-unit <project> <unit> --phase review`. Read the source file beside `target_file`, with the style guide, the glossary entries, and the ledger entries. Read every sentence; compare meaning, not surface.
+   - Read the files whole. Never filter lines out to make them easier to read: a print stamp (`ch04_4772.qxd … Page 92`) can share a line with a list item or a sentence, and dropping the line hides it from you. In the first real review a filtered view produced a false omission finding and hid source paragraphs.
+   - Before reporting a passage as missing or added, look at `neighbour_targets` (the end of the previous unit's translation and the start of the next): translators move a sentence split by a page break to one side of the join. When the source itself lost text, check the source PDF page.
 3. For each error, add a finding to the unit's `findings`:
 
    ```json
@@ -113,7 +121,7 @@ Read [translation-quality.md](translation-quality.md) first. The reviewer must n
    ```
 
    - `category` and `severity` as defined in translation-quality.md. Mark a meaning change or a lost sentence `major`; reserve `critical` for errors that could cause harm.
-   - `cause` is a short slug naming why the error happened, reused across books (`term-not-in-glossary`, `name-policy-not-followed`, `sentence-dropped-in-long-paragraph`, `false-friend`, `unit-join-duplicate`). Rule proposals are grouped by it.
+   - `cause` is a short slug naming why the error happened, reused across books (`term-not-in-glossary`, `name-policy-not-followed`, `idiom-taken-literally`, `note-marker-dropped`, `sentence-dropped-in-long-paragraph`, `false-friend`, `unit-join-duplicate`). Rule proposals are grouped by it, across categories. Reuse an existing slug when one fits.
    - `source_excerpt` is the source words involved; `target_excerpt` is the target words (empty for an omission).
 4. Set the unit's verdict: `ok` when it has no open finding, otherwise `findings`. Set `reviewer` to your name.
 5. Once per review, read `qa/translation-signals.json` and the glossary and ledger: for every name or term rendered more than one way, add a `terminology.inconsistent` finding to one unit where it departs.

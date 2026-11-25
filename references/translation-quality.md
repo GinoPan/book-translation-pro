@@ -43,14 +43,20 @@ Each finding has a severity, weighted as in MQM 2.0:
    | Check | Status | Finds |
    |---|---|---|
    | `content.repeated_text` | fail | A sentence the target repeats more often than the source repeats any, within a unit or across the join of two units |
-   | `style.typography` | warn | Language-profile typography: half-width punctuation between Chinese characters, doubled punctuation, a space between characters, unpaired quotation marks and brackets |
+   | `style.typography` | warn | Language-profile typography: half-width punctuation between Chinese characters, doubled punctuation, a space between characters, zero-width characters, unpaired quotation marks and brackets |
    | `terminology.name_consistency` | warn | A name printed in English in some units and translated in others (one summary line; details in `qa/translation-signals.json`) |
    | `terminology.ledger` / `terminology.ledger_conflict` | warn | A unit that departs from a recorded rendering; a term recorded with two renderings |
    | `content.excused_units` | warn | A fifth or more of the units carry a reflow or reconstruction note, which turns their paragraph, length, and number checks into warnings |
+   | `content.split_sentence` | warn | A translation that ends or starts with `……` the source does not have: a sentence split by a page break left as fragments |
+   | `content.note_markers` | warn | Fewer note markers (`^8^`, superscripts, `[^8]`, a digit after full-width punctuation) in the translation than in the source, counted with the neighbouring units so a marker that moved with its sentence is not reported |
+   | `structure.heading_paragraph` | warn | A heading that is a paragraph: about 67 Chinese characters or more, ending in a full stop |
+   | `terminology.hyphenated` | warn | An approved term the source prints hyphenated (`Kan-Ban`), which the glossary selection misses, absent from the translation. The selection itself is a dependency and is left unchanged |
+
+   Typography leaves out diagram labels (spaced to fit a drawing) and counts a bare link as a word. The name check also finds names the source prints in capitals (`DR. C. J. MCNAIR`) and leaves out placeholder units. It still counts a name kept in English in a citation, as the name policy requires, as an English mention; on Lean most of the 12 names it lists after the fixes are of that kind.
 
    Checks that depend on the target language come from a **language profile** (`quality.PROFILES`; Chinese first). For a target without a profile, QA says the check was not run.
-4. **Independent review.** `translation-review` selects units: in Publication every unit; in Study a share (`quality.review_sample_share`, 10%) of each stretch of the book, spread evenly, plus every unit a rule signal points at (a short target, few target sentences, repeated text, typography). A reviewer who did not translate the units reads each source beside its translation and records findings. Running `translation-review` again keeps the verdicts and findings already entered in the review file, recorded or not; a unit whose translation changed since goes back to pending with its findings kept. QA fails on an open major or critical finding, on open findings above the bar, and on a stretch whose sample scored above the bar until every unit of it is reviewed. The user reads `qa/translation-review/index.html` and approves the `translation_review` checkpoint.
-5. **From defects to rules.** Every finding carries a `cause`: a short slug naming why the error happened (`term-not-in-glossary`, `name-policy-not-followed`, `sentence-dropped-in-long-paragraph`, `false-friend`, `unit-join-duplicate`). `quality-rules <project> [<project> ...]` groups findings across books by category and cause and proposes a rule for a cause found three or more times: widen an existing check (and add the examples to its tests) or add a line to the translation protocol or style guide. A person decides; the tool changes nothing.
+4. **Independent review.** `translation-review` selects units: in Publication every unit; in Study a share (`quality.review_sample_share`, 10%) of each stretch of the book, spread evenly, plus every unit a rule signal points at (a short target, few target sentences, repeated text, typography, missing note markers, a sentence fragment at a join). A unit whose translation holds no reader text (an omitted index, an exhibit rebuilt in another unit) is never selected: there is nothing to read, and QA checks its note. A reviewer who did not translate the units reads each source beside its translation and records findings. Running `translation-review` again keeps the verdicts and findings already entered in the review file, recorded or not; a unit whose translation changed since goes back to pending with its findings kept. QA fails on an open major or critical finding, on open findings above the bar, and on a stretch whose sample scored above the bar until every unit of it is reviewed. The user reads `qa/translation-review/index.html` and approves the `translation_review` checkpoint.
+5. **From defects to rules.** Every finding carries a `cause`: a short slug naming why the error happened (`term-not-in-glossary`, `name-policy-not-followed`, `sentence-dropped-in-long-paragraph`, `false-friend`, `unit-join-duplicate`). `quality-rules <project> [<project> ...]` groups findings across books by cause (one cause, such as `term-not-in-glossary`, shows up under several categories) and proposes a rule for a cause found three or more times: widen an existing check (and add the examples to its tests) or add a line to the translation protocol or style guide. A person decides; the tool changes nothing.
 
 ## Measuring the checks
 
@@ -70,6 +76,23 @@ Measured on Lean Accounting (280 units, a finished and reviewed translation; no 
 | Dropped sentence | 10% | 36% | Only a reader finds it reliably |
 
 On Lean's first translation (v1), with its known defects, the checks found the passage translated twice across the join of units 0091 and 0092, the omission in unit 0077 (7 of 24 paragraphs, 45% of the source length), and Toyota and Deming printed both in English and in Chinese. The wrong terms (箱线分数表 for "box score", Jidoka left in English, mass production rendered two ways) are invisible to every rule: they are what the ledger prevents and the review finds.
+
+### The first real review (Lean Accounting, 2026-11-25)
+
+A reviewer who had not translated the book read 56 of its 280 units (the Study sample and the signalled units) against the source. Found: 35 findings, 3.0 weighted per 1,000 source words (bar 10); one more finding was withdrawn as the reviewer's own error. Six were major:
+
+- "Fortune 50" rendered 五百强 (the number check missed it: the target spells the number);
+- "what he meant is lost on most managers" rendered as *forgotten*;
+- a paragraph marked as a heading by extraction and kept;
+- a literature reference dropped from a note;
+- the unit-cost formula losing its divisor *N*, set on its own line by extraction;
+- a first half of a sentence split by six pages of exhibits.
+
+With the checks added afterwards (below), the review read 21 more units: the 16 they flagged for missing note markers and 5 sample picks moved off placeholder units. That found two more major omissions (a quotation ending a unit and two sentences across a page break, both in units the signal chose) and 25 more dropped note markers. In all: 77 units, 62 findings, 7 major, 3.1 weighted per 1,000 source words, all fixed.
+
+The minor ones were mostly names rendered two ways (Deming as 戴明 and as Deming, chapter authors transliterated in some chapters), terms missing from the glossary (continuous improvement, performance measurement, activity-based costing, True North), idioms taken literally, dropped note markers, and heading markup that differed by chapter.
+
+What changed because of it: the four checks above (each measured on Lean: they find the 5 split sentences, the 11 paragraphs marked as headings, and the 1 hyphenated term the review found, and nothing in the fixed translation except one inflected term, `target cost-ing model`; the note-marker check flags 19 units of the original translation, every one confirmed by the review, and none after the fixes), typography no longer reporting labels and removed links, the review skipping placeholder units (20 of the 56 first picks; a sample pick that falls on one moves to the nearest readable unit, so the other picks keep their places), recording a review also updating the review file (a rebuild had taken older verdicts from it), the reviewer seeing the edges of the neighbouring units, rule proposals grouped by cause, and the protocol lines on idioms, names in bylines, split sentences, heading markup, note markers, formulas, and added text.
 
 Rejected after measurement (do not reintroduce without new evidence):
 
