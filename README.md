@@ -1,7 +1,7 @@
 # Book Translation Pro
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-lightgrey.svg)](LICENSE)
 
 面向整本书翻译的可恢复工作流，支持 **PDF、DOCX、EPUB 和 CHM** 输入，并提供结构保真、术语管理、上下文衔接、视觉证据、完整性检查与出版级输出。
 
@@ -191,7 +191,7 @@ python -m pytest -q
 
 ## 版权与授权
 
-代码以 [MIT License](LICENSE) 发布。第三方组件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+代码以 [PolyForm Noncommercial License 1.0.0](LICENSE) 发布：可免费用于个人学习、研究和爱好项目，以及学校、公益组织和公共机构；不得用于商业目的，商业使用需另行取得作者授权。此前以 MIT License 发布的版本，已取得者仍可按 MIT 使用。第三方组件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 翻译通常属于对原作的衍生使用。合法持有一本书，并不必然意味着拥有翻译、复制、公开发布或商业分发的权利。使用者应根据作品状态、授权文件和适用法律确认自己的权限；本工具记录使用者的声明，但不提供法律意见或权利认证。
 
