@@ -175,11 +175,14 @@ def initialize_project(
 
 
 # Semantic work survives ``prepare --rebuild``: translations, edits, capsules,
-# worker observations, page reviews, and approved exceptions are preserved and
-# revalidated through dependency hashes instead of being deleted.
+# worker observations, page reviews, translation and exhibit reviews, and approved
+# exceptions are preserved and revalidated (dependency hashes, review evidence
+# hashes) instead of being deleted.  The figure-render record keeps unchanged
+# figures from being drawn again.
 _PRESERVED_ON_REBUILD = {
     "state": {"observations"},
-    "qa": {"exceptions.json", "visual-reviews"},
+    "qa": {"exceptions.json", "visual-reviews", "translation-review.json", "translation-review",
+           "exhibit-review.json", "exhibit-review", "figure-render.json"},
 }
 
 

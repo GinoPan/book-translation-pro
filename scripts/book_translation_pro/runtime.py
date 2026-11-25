@@ -33,20 +33,29 @@ def _candidate_paths(name: str) -> list[Path]:
     return values
 
 
+def _is_file(path: Path) -> bool:
+    """Whether the path is a file; a folder this process may not read is not one (Python
+    3.12 raises PermissionError there instead of answering False)."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def find_binary(name: str) -> Path | None:
     if name == "java":
         configured_java = os.environ.get("BTP_JAVA_PATH")
-        if configured_java and Path(configured_java).is_file():
+        if configured_java and _is_file(Path(configured_java)):
             return Path(configured_java)
     if name == "epubcheck":
         configured = os.environ.get("BTP_EPUBCHECK_PATH")
-        if configured and Path(configured).is_file():
+        if configured and _is_file(Path(configured)):
             return Path(configured)
     located = shutil.which(name)
     if located:
         return Path(located)
     for candidate in _candidate_paths(name):
-        if candidate.is_file():
+        if _is_file(candidate):
             return candidate
     return None
 
@@ -57,7 +66,7 @@ def epubcheck_command() -> list[str] | None:
         return [str(executable)]
     jar = os.environ.get("BTP_EPUBCHECK_JAR")
     java = find_binary("java")
-    if jar and Path(jar).is_file() and java:
+    if jar and _is_file(Path(jar)) and java:
         return [str(java), "-jar", str(Path(jar))]
     return None
 

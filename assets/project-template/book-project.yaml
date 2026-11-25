@@ -42,9 +42,8 @@ execution:
   max_parallel: 8
   max_attempts_per_unit: 2
   keep_intermediates: true
-  checkpoints:
-    - terminology
-    - visual_exceptions
+  # checkpoints come from the mode (study: terminology, visual_exceptions, source_readiness,
+  # exhibits, translation_review). A list here replaces that list as a whole.
 
 chunking:
   target_characters: 6000

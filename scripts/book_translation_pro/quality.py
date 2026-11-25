@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from difflib import SequenceMatcher
 from typing import Any, Iterable
 
 from .glossary import entry_matches, target_matches
@@ -59,6 +60,13 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?…])\s+|(?<=[。！？])")
 _EMPHASIS_RE = re.compile(r"[*_`\\]+")
 _SPACE_RE = re.compile(r"\s+")
 REPEAT_MIN_WEIGHT = 8          # about 13 Chinese characters or 8 English words
+# A source sentence translates into a heavier target one (seven English words make about
+# fourteen Chinese characters), so a repeat in the source excuses one from half the weight.
+SOURCE_REPEAT_MIN_WEIGHT = 4
+# Two source sentences that differ by a typo translate the same.  Rows that differ in
+# their numbers are different rows, so the numbers must match.
+NEAR_DUPLICATE = 0.97
+_DIGITS_RE = re.compile(r"\d+")
 JOIN_WINDOW = 3                # sentences on each side of a join between units
 
 
@@ -97,11 +105,34 @@ def _target_repeats(pieces: list[str]) -> Counter[str]:
     return Counter({piece: n - 1 for piece, n in Counter(pieces).items() if n > 1})
 
 
+def _near_duplicates(pieces: Iterable[str]) -> int:
+    """Pairs of different sentences that are the same but for a slip ("waits" / "awaits")."""
+    distinct = sorted(set(pieces))
+    pairs = 0
+    for index, first in enumerate(distinct):
+        for second in distinct[index + 1:]:
+            if _DIGITS_RE.findall(first) != _DIGITS_RE.findall(second):
+                continue
+            matcher = SequenceMatcher(None, first, second, autojunk=False)
+            if (matcher.real_quick_ratio() >= NEAR_DUPLICATE and matcher.quick_ratio() >= NEAR_DUPLICATE
+                    and matcher.ratio() >= NEAR_DUPLICATE):
+                pairs += 1
+    return pairs
+
+
 def _source_repeats(source: str) -> int:
     """Repeats in the source, counted on its joined text: a copy that extraction wrapped
-    across two lines or blocks, or printed without its full stop, still counts."""
-    joined = " ".join(sentences(source))
-    return sum(joined.count(piece) - 1 for piece in set(_long(sentences(source))) if joined.count(piece) > 1)
+    across two lines or blocks, or printed without its full stop, still counts.  A short
+    sentence (a list item or a table cell) counts when it is repeated whole, and two
+    sentences that differ by a slip count as a repeat."""
+    pieces = sentences(source)
+    joined = " ".join(pieces)
+    long = set(_long(pieces))
+    exact = sum(joined.count(piece) - 1 for piece in long if joined.count(piece) > 1)
+    short = Counter(piece for piece in pieces
+                    if piece not in long and _weight(piece) >= SOURCE_REPEAT_MIN_WEIGHT)
+    exact += sum(n - 1 for n in short.values())
+    return exact + _near_duplicates(piece for piece in pieces if _weight(piece) >= SOURCE_REPEAT_MIN_WEIGHT)
 
 
 # --- checks ---------------------------------------------------------------------------------
@@ -195,10 +226,16 @@ def heading_paragraphs(markdown: str) -> list[str]:
 
 
 # Note markers as extraction writes them (^8^, <sup>8</sup>, [^8]) and as a translation may
-# (digits right after full-width punctuation, superscript digits).
-_SOURCE_NOTE_RE = re.compile(r"\^\d{1,3}\^|<sup>\s*\d{1,3}\s*</sup>|\[\^[^\]]+\](?!:)")
-_TARGET_NOTE_RE = re.compile(r"\^\d{1,3}\^|<sup>\s*\d{1,3}\s*</sup>|\[\^[^\]]+\](?!:)|[⁰¹²³⁴⁵⁶⁷⁸⁹]+"
-                             r"|(?<=[。，；：！？”）])\d{1,3}(?![\d.]|\s*[年月日%])")
+# (digits right after full-width punctuation, superscript digits).  <sup> is rewritten as
+# ^8^ first: the comparison text drops every tag.
+_SUP_NOTE_RE = re.compile(r"<sup\b[^>]*>\s*(?:<a\b[^>]*>\s*)?\\?\[?\s*(\d{1,3})\s*\\?\]?\s*(?:</a>\s*)?</sup>",
+                          re.IGNORECASE)
+_SOURCE_NOTE_RE = re.compile(r"\^\d{1,3}\^|\[\^[^\]]+\](?!:)")
+# A number after punctuation that a measure word or unit follows is a quantity
+# ("包括：3个步骤", "其中，10家企业"), not a note marker.
+_COUNTED = "个家项次步条章节点页图表强倍元万亿千百种位名台件类份组轮届期层级段行列部本篇块张人所季天周岁年月日号时分秒米吨磅%"
+_TARGET_NOTE_RE = re.compile(r"\^\d{1,3}\^|\[\^[^\]]+\](?!:)|[⁰¹²³⁴⁵⁶⁷⁸⁹]+"
+                             rf"|(?<=[。，；：！？”）])\d{{1,3}}(?![\d.]|\s*[{_COUNTED}])")
 
 
 def note_markers(source: str, target: str) -> tuple[int, int]:
@@ -207,10 +244,11 @@ def note_markers(source: str, target: str) -> tuple[int, int]:
     from .qa import _comparison_text
 
     def count(pattern: re.Pattern[str], text: str) -> int:
+        text = _comparison_text(_SUP_NOTE_RE.sub(r"^\1^", text))
         # A marker that starts a line opens the note's own text, not a reference to it.
         return sum(1 for m in pattern.finditer(text) if m.start() and text[m.start() - 1] != "\n")
 
-    return count(_SOURCE_NOTE_RE, _comparison_text(source)), count(_TARGET_NOTE_RE, _comparison_text(target))
+    return count(_SOURCE_NOTE_RE, source), count(_TARGET_NOTE_RE, target)
 
 
 def note_marker_gaps(units: list[Unit]) -> list[dict[str, Any]]:

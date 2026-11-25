@@ -125,6 +125,30 @@ class V1ContractTests(unittest.TestCase):
             # Without a print stamp there is no page to recognise a running head by.
             self.assertIn("**160** **Lean Accounting**", clean_bilingual_side(root, "**160** **Lean Accounting**"))
 
+    def test_a_divider_table_emptied_of_its_spacer_goes_but_other_tables_stay(self) -> None:
+        from PIL import Image
+
+        from book_translation_pro.publication import _pipe_table_count, clean_bilingual_side
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images = root / "assets" / "original" / "7485final"
+            images.mkdir(parents=True)
+            Image.new("RGB", (1, 2)).save(images / "_.gif")    # a CHM spacer
+            spacer = '| **<img src="assets\\original/7485final/_.gif" width="1" height="2" alt="End Figure" />** |'
+            text = "\n".join([
+                "Before.", "", "|  |", "|----|", spacer, "",
+                "| Cost | Value |", "|---|---|", "| Labor | 10 |", "",            # a real table
+                "|  |", "|----|", "| keep me |", "",                             # text in an empty-headed table
+                "|  |", "|----|", "",                                             # empty, but nothing was removed from it
+                "After.",
+            ])
+            cleaned = clean_bilingual_side(root, text)
+            self.assertNotIn("_.gif", cleaned)
+            self.assertEqual(_pipe_table_count(cleaned), 3)
+            self.assertEqual(cleaned.split("| Cost")[0].strip(), "Before.")   # the divider is gone whole
+            self.assertIn("| keep me |", cleaned)
+            self.assertTrue(cleaned.endswith("|  |\n|----|\n\nAfter."))
+
     def test_prepare_drops_image_slivers_but_keeps_pictures_text_and_missing_files(self) -> None:
         from PIL import Image
 
@@ -351,6 +375,20 @@ class V1ContractTests(unittest.TestCase):
         result = release_check()
         self.assertEqual(result["version"], "1.0.0")
         self.assertTrue(result["contract_ready"], result)
+
+    def test_every_shipped_schema_is_checked_by_the_release(self) -> None:
+        from book_translation_pro.release import REQUIRED_SCHEMAS
+
+        schemas = Path(__file__).resolve().parents[2] / "references" / "schemas"
+        self.assertEqual(set(REQUIRED_SCHEMAS), {path.name for path in schemas.glob("*.json")})
+
+    def test_the_project_template_keeps_each_modes_checkpoints(self) -> None:
+        from book_translation_pro.config import MODE_DEFAULTS, load_yaml, resolve_config
+
+        template = load_yaml(Path(__file__).resolve().parents[2] / "assets" / "project-template" / "book-project.yaml")
+        for mode, defaults in MODE_DEFAULTS.items():
+            resolved = resolve_config(template, {"mode": mode})
+            self.assertEqual(resolved["execution"]["checkpoints"], defaults["execution"]["checkpoints"], mode)
 
     def test_publication_signoff_is_bound_to_candidate_and_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

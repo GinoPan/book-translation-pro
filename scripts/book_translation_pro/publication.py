@@ -1181,8 +1181,11 @@ def clean_bilingual_side(project: Path, text: str) -> str:
     print stamps and the running folio after them, and converter slivers of drawings
     (raw ``<img>`` too narrow to be a picture).  A real picture left as raw ``<img>``
     becomes a Markdown image, so the DOCX writer keeps it.  A line that still holds
-    text or an image is never dropped."""
+    text or an image is never dropped.  A pipe table left with no text by these removals
+    (a CHM divider table that only held a spacer image) goes too: Pandoc drops an empty
+    table, which would leave the table count short."""
     out: list[str] = []
+    dropped_in_table: set[int] = set()  # where in ``out`` a table line was removed
     page: str | None = None
     for line in text.splitlines():
         original = line
@@ -1201,9 +1204,29 @@ def clean_bilingual_side(project: Path, text: str) -> str:
 
         line = HTML_IMAGE_TAG_RE.sub(image, line)
         if line != original and not _has_content(line):
+            if original.lstrip().startswith("|"):
+                dropped_in_table.add(len(out))
             continue
         out.append(line)
-    return "\n".join(out).strip()
+    return "\n".join(_without_emptied_tables(out, dropped_in_table)).strip()
+
+
+def _without_emptied_tables(lines: list[str], dropped_at: set[int]) -> list[str]:
+    """The lines without each pipe table that lost a line and holds no text any more."""
+    keep = [True] * len(lines)
+    start = 0
+    while start < len(lines):
+        if not lines[start].lstrip().startswith("|"):
+            start += 1
+            continue
+        end = start
+        while end < len(lines) and lines[end].lstrip().startswith("|"):
+            end += 1
+        lost_a_line = any(start <= position <= end for position in dropped_at)
+        if lost_a_line and not any(_has_content(line) for line in lines[start:end]):
+            keep[start:end] = [False] * (end - start)
+        start = end
+    return [line for line, kept in zip(lines, keep) if kept]
 
 
 def _source_stand_in(project: Path, target: str, shown: set[str]) -> str:

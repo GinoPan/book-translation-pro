@@ -28,6 +28,7 @@ REQUIRED_SCHEMAS = (
     "publication-review.schema.json",
     "exhibit-inventory.schema.json",
     "exhibit-review.schema.json",
+    "translation-review.schema.json",
 )
 
 

@@ -122,6 +122,38 @@ class RepeatedTextTests(unittest.TestCase):
         target = "见下表。\n\n数据如下。\n\n见下表。"
         self.assertEqual(repeated_text([_unit("unit-0001", "See the table. Data follows.", target)]), [])
 
+    def test_a_short_source_item_repeated_whole_excuses_its_longer_translation(self) -> None:
+        # Seven English words are below the repeat weight; their Chinese is above it.
+        source = ("- Accurate labor routings and bills of materials\n\n- Stable flow\n\n"
+                  "- Accurate labor routings and bills of materials\n")
+        target = "- 准确的人工工艺路线与物料清单\n\n- 稳定的流动\n\n- 准确的人工工艺路线与物料清单\n"
+        self.assertEqual(repeated_text([_unit("unit-0001", source, target)]), [])
+
+    def test_two_source_items_differing_by_a_slip_excuse_one_translation_twice(self) -> None:
+        source = ("- Elimination waits further lean progress, discussed in chapter 12\n\n- Stable flow\n\n"
+                  "- Elimination awaits further lean progress, discussed in chapter 12\n")
+        target = "- 其取消有待精益的进一步推进——参见第12章的讨论\n\n- 稳定的流动\n\n- 其取消有待精益的进一步推进——参见第12章的讨论\n"
+        self.assertEqual(repeated_text([_unit("unit-0001", source, target)]), [])
+
+    def test_a_short_phrase_inside_other_sentences_does_not_excuse_a_repeat(self) -> None:
+        # The phrase recurs only inside longer sentences, never whole: not a source repeat.
+        source = ("The value stream manager sets the measures. Every week the value stream manager "
+                  "reviews the box score with the team.")
+        target = f"{LONG_ZH}\n\n{LONG_ZH_2}{LONG_ZH}"
+        found = repeated_text([_unit("unit-0001", source, target)])
+        self.assertEqual([f["where"] for f in found], ["within the unit"])
+
+    def test_rows_that_differ_only_in_their_numbers_do_not_excuse_a_repeat(self) -> None:
+        source = "Cell 1 produced 250 units at a cycle time of 30 seconds.\n\nCell 2 produced 260 units at a cycle time of 30 seconds.\n"
+        target = f"{LONG_ZH}\n\n{LONG_ZH}\n"
+        self.assertEqual(len(repeated_text([_unit("unit-0001", source, target)])), 1)
+
+    def test_different_source_sentences_do_not_excuse_a_repeat(self) -> None:
+        source = ("- Accurate labor routings and bills of materials\n"
+                  "- Accurate inventory records for every value stream\n")
+        target = "- 准确的人工工艺路线与物料清单\n\n- 准确的人工工艺路线与物料清单\n"
+        self.assertEqual(len(repeated_text([_unit("unit-0001", source, target)])), 1)
+
 
 def _named_units(english_in: int, translated_in: int, name: str = "Deming", gloss: bool = False):
     units = []
@@ -448,6 +480,46 @@ class TranslationReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(BTPError, "not among the units selected"):
                 show_unit(root, "unit-0001", "review")
 
+    def test_neighbour_edges_pass_over_a_unit_with_no_reader_text(self) -> None:
+        targets = [self.TARGETS[0], "<!-- 本单元内容已在 unit-0003 中重建。 -->\n", self.TARGETS[2]]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = _translated_project(root, targets, sources={
+                "unit-0001": "# Bearing 1\n\nThe preload is set by the",
+                "unit-0002": "<!-- exhibit rebuilt in unit-0003 -->\n",
+                "unit-0003": "operator before each run.\n"})
+            config["quality"]["review_scope"] = "all"
+            build_translation_review(root, config)
+            review = show_unit(root, "unit-0003", "review")
+            self.assertEqual(review["neighbour_targets"]["previous_end"], self.TARGETS[0].strip())
+            self.assertEqual(review["neighbour_sources"]["previous_end"], "# Bearing 1\n\nThe preload is set by the")
+            # The translator sees the other half of the split sentence too, and the editor the drafts.
+            first = show_unit(root, "unit-0001", "edit")
+            self.assertEqual(first["neighbour_sources"],
+                             {"previous_end": "", "next_start": "operator before each run."})
+            self.assertEqual(first["neighbour_targets"]["next_start"], self.TARGETS[2].strip())
+
+    def test_a_neighbour_not_written_yet_ends_the_search(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _translated_project(root, self.TARGETS)
+            (root / "target" / "draft" / "unit-0002.md").unlink()
+            package = show_unit(root, "unit-0001", "edit")
+            # Not unit-0003's draft shown as if it came next.
+            self.assertEqual(package["neighbour_targets"]["next_start"], "")
+
+    def test_show_unit_gives_the_page_review_findings_that_change_the_translation(self) -> None:
+        from book_translation_pro.cli import _translation_findings
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            review = {"findings": [
+                {"id": "f1", "affects_translation": True, "status": "resolved", "note": "the reading order is column 2 first"},
+                {"id": "f2", "affects_translation": False, "status": "resolved", "note": "a cropped folio"}]}
+            atomic_write_json(root / "qa" / "visual-reviews" / "page-0007.json", review)
+            self.assertEqual([f["id"] for f in _translation_findings(root, 7)], ["f1"])
+            self.assertEqual(_translation_findings(root, 8), [])
+
     def test_units_with_no_reader_text_are_not_selected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -457,6 +529,19 @@ class TranslationReviewTests(unittest.TestCase):
             review = load_json(root / TEMPLATE)
             self.assertEqual([i["unit_id"] for i in review["items"]], ["unit-0001", "unit-0002", "unit-0003"])
             self.assertEqual(sum(c["units"] for c in review["chapters"].values()), 3)
+
+    def test_a_unit_emptied_after_its_review_leaves_the_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = _translated_project(root, self.TARGETS)
+            config["quality"]["review_scope"] = "all"
+            build_translation_review(root, config)
+            record_translation_review(root, config, _judge(root, {}))
+            atomic_write_text(root / "target" / "edited" / "unit-0003.md", "<!-- 本单元内容已在 unit-0002 中重建。 -->\n")
+            build_translation_review(root, config)
+            review = load_json(root / TEMPLATE)
+            self.assertEqual([i["unit_id"] for i in review["items"]], ["unit-0001", "unit-0002"])
+            self.assertEqual(sum(c["units"] for c in review["chapters"].values()), 2)
 
     def test_a_sample_pick_on_a_placeholder_moves_to_its_nearest_readable_neighbour(self) -> None:
         targets = [f"# 轴承 {n}\n\n轴承预紧为 {n * 10} mm。\n" for n in range(1, 11)]
@@ -558,6 +643,25 @@ class ReviewLessonCheckTests(unittest.TestCase):
         # A year or a percentage after punctuation is not a marker.
         self.assertEqual(note_marker_gaps([_unit("unit-0001", "Sales rose.^1^", "销售增长，2005 年为 12%。")]),
                          [{"unit_id": "unit-0001", "source": 1, "target": 0}])
+
+    def test_sup_markers_count_on_both_sides(self) -> None:
+        from book_translation_pro.quality import note_markers
+
+        # EPUB and HTML sources print <sup>8</sup>; the comparison text used to drop the tags.
+        self.assertEqual(note_markers("A word<sup>8</sup> here.", "一个词<sup>8</sup>。"), (1, 1))
+        self.assertEqual(note_markers('Costs<sup><a href="#n3">[3]</a></sup> fell.', "成本下降了。"), (1, 0))
+        # A ^8^ source kept as <sup>8</sup> in the translation is kept, not dropped.
+        self.assertEqual(note_marker_gaps([_unit("unit-0001", "A word^8^ here.", "一个词<sup>8</sup>。")]), [])
+        self.assertEqual(note_marker_gaps([_unit("unit-0001", "A word<sup>8</sup> here.", "一个词。")]),
+                         [{"unit_id": "unit-0001", "source": 1, "target": 0}])
+
+    def test_a_counted_quantity_after_punctuation_does_not_hide_a_dropped_marker(self) -> None:
+        source = "It has three steps.^4^ Ten firms joined."
+        target = "包括：3个步骤，其中，10家企业加入。例如：50强。"
+        self.assertEqual(note_marker_gaps([_unit("unit-0001", source, target)]),
+                         [{"unit_id": "unit-0001", "source": 1, "target": 0}])
+        # A digit after punctuation with no measure word still counts as the marker.
+        self.assertEqual(note_marker_gaps([_unit("unit-0001", source, "它有三个步骤。4十家企业加入了。")]), [])
 
 
 class RuleProposalTests(unittest.TestCase):
