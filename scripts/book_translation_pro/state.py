@@ -169,7 +169,11 @@ def _current_dependencies(
         incoming_capsule_hash = hash_data({"root": True})
     book_map = load_json(project / "analysis" / "book-map.json")
     node = next((item for item in book_map["nodes"] if item["id"] == entry["book_node_id"]), {})
-    term_hashes = selected_hashes(glossary, source_text, entry["book_node_id"])
+    from .qa import _term_source
+
+    # Terms are selected from the lines a translation renders (no running heads or
+    # scrambled sideways text), the same lines QA checks them in.
+    term_hashes = selected_hashes(glossary, _term_source(source_text), entry["book_node_id"])
     dependencies = {
         "source": sha256_file(source),
         "config": translation_config_hash(config),

@@ -97,6 +97,21 @@ class RebuildPreservesWork(unittest.TestCase):
             self.assertIn("dependency_changed:source", queue["details"]["unit-0002"])
             self.assertEqual(queue["capsule_unit_ids"], ["unit-0002"])
 
+    def test_rebuild_keeps_the_reviewers_work_and_clears_derived_qa(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = new_project(Path(temp))
+            translate_all(project)
+            kept = ["qa/translation-review.json", "qa/translation-review/review.json",
+                    "qa/exhibit-review.json", "qa/exhibit-review/index.html", "qa/figure-render.json",
+                    "qa/exceptions.json"]
+            for relative in kept + ["qa/completeness.json"]:
+                atomic_write_text(project / relative, "{}\n")
+            with patch("book_translation_pro.project.convert_to_markdown", fake_conversion(BOOK)):
+                prepare_project(project, rebuild=True)
+            for relative in kept:
+                self.assertEqual((project / relative).read_text(encoding="utf-8"), "{}\n", relative)
+            self.assertFalse((project / "qa" / "completeness.json").exists())  # derived: written again by qa
+
     def test_rebuild_quarantines_files_of_units_that_no_longer_exist(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = new_project(Path(temp))
@@ -565,6 +580,25 @@ class TermCheckSource(unittest.TestCase):
         source = "**88** **Lean Accounting**\n\nLean Accounting changes how costs are reported."
         self.assertEqual([e["id"] for e in select_entries(glossary, _term_source(source))], ["la"])
         self.assertEqual(select_entries(glossary, _term_source("**88** **Lean Accounting**")), [])
+
+    def test_the_translator_and_the_dependency_hash_select_terms_as_qa_does(self) -> None:
+        from book_translation_pro.artifacts import hash_data
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            make_project(root, with_term=True)
+            record_review(root, "terminology", True, "tester", "approved")
+            source = root / "source-work" / "work-units" / "unit-0001.md"
+            # The term only in a running head: not in the text the translator renders.
+            atomic_write_text(source, "**88** **Bearing Preload**\n\nThe shaft turns freely.\n")
+            package = show_unit(root, "unit-0001", "translate")
+            self.assertEqual(package["glossary_entries"], [])
+            self.assertEqual(package["dependency_hashes"]["glossary_selection"], hash_data({}))
+            # In prose it is selected, and the hash follows.
+            atomic_write_text(source, "**88** **Bearing Preload**\n\nThe bearing preload is 10 mm.\n")
+            package = show_unit(root, "unit-0001", "translate")
+            self.assertEqual([e["id"] for e in package["glossary_entries"]], ["preload"])
+            self.assertNotEqual(package["dependency_hashes"]["glossary_selection"], hash_data({}))
 
 
 class ConcurrentRecording(unittest.TestCase):

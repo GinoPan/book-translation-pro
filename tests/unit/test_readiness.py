@@ -101,6 +101,39 @@ class SourceReadinessTests(unittest.TestCase):
             summary = readiness_report(project)
             self.assertEqual((summary["status"], summary["by_kind"].get("print_stamps")), ("ready", 1))
 
+    def test_each_page_of_a_two_page_diagram_is_checked_with_its_own_picture(self) -> None:
+        from book_translation_pro.cli import _unit_exhibits
+        from book_translation_pro.readiness import _caption_problems
+
+        def part(number: int, page: int, caption: str) -> dict:
+            return {"key": "11.6", "label": "EXHIBIT", "page": page, "part": number, "parts": 2,
+                    "rotation": 0, "caption": caption, "classification": "diagram"}
+
+        first = "EXHIBIT 11.6 Type 1, 2, and 3 System Design Relationships"
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "analysis").mkdir()
+            (project / "analysis" / "exhibit-inventory.json").write_text(json.dumps(
+                {"exhibits": [part(1, 315, first), part(2, 316, "EXHIBIT 11.6 Continued")]}), encoding="utf-8")
+            block = '<!-- btp:figure-labels exhibit="11.6" -->\n1. Design\n<!-- /btp:figure-labels -->'
+            texts = {"unit-0001": f"![](assets/original/images/exhibit-11-6.png)\n\n{block}\n\n**{first}**\n",
+                     "unit-0002": f"![](assets/original/images/exhibit-11-6-p2.png)\n\n{block}\n\n"
+                                  "**EXHIBIT 11.6 Continued**\n"}
+            self.assertEqual(_caption_problems(project, texts), [])
+            # Part 2's picture left in the unit before its caption is found.
+            moved = {"unit-0001": texts["unit-0001"] + "\n![](assets/original/images/exhibit-11-6-p2.png)\n",
+                     "unit-0002": "**EXHIBIT 11.6 Continued**\n"}
+            self.assertEqual([p["kind"] for p in _caption_problems(project, moved)], ["caption_apart_from_picture"])
+            # The translator of part 2 sees part 2's picture.
+            images = project / "assets" / "original" / "images"
+            images.mkdir(parents=True)
+            for name in ("exhibit-11-6.png", "exhibit-11-6-p2.png"):
+                (images / name).write_bytes(b"png")
+            (item,) = _unit_exhibits(project, texts["unit-0002"])
+            self.assertEqual(Path(item["source_image"]).name, "exhibit-11-6-p2.png")
+            (item,) = _unit_exhibits(project, texts["unit-0001"])
+            self.assertEqual(Path(item["source_image"]).name, "exhibit-11-6.png")
+
     def test_a_project_prepared_before_the_gate_is_not_blocked_by_it(self) -> None:
         from book_translation_pro.config import persist_overrides
         from book_translation_pro.project import prepare_project

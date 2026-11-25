@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import BTPError, atomic_write_json, atomic_write_text, hash_data, load_json
-from .figures import IMAGE_RE, _figure_asset_name
+from .figures import IMAGE_RE
 from .manifest import load_manifest
 
 CHECKPOINT = "source_readiness"
@@ -77,13 +77,13 @@ def _caption_problems(project: Path, texts: dict[str, str]) -> list[dict[str, An
     inventory_path = project / "analysis" / "exhibit-inventory.json"
     if not inventory_path.is_file():
         return []
-    from .retrofit import _is_caption_of, _plain
+    from .retrofit import _is_caption_of, _plain, crop_asset_name
 
     problems = []
     for exhibit in load_json(inventory_path)["exhibits"]:
         if exhibit["classification"] != "diagram":
             continue
-        asset = _figure_asset_name(exhibit["key"])
+        asset = crop_asset_name(exhibit)  # a later page of a diagram has its own picture
         pictures = [uid for uid, text in texts.items() if asset in text]
         captions = [uid for uid, text in texts.items()
                     if any(_is_caption_of(_plain(line), exhibit) for line in text.splitlines())]

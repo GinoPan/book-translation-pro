@@ -64,6 +64,33 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(report["binaries"]["word"]["found"])
         self.assertFalse(report["publication_ready"])
 
+    def test_a_folder_it_may_not_read_is_passed_over_not_a_crash(self) -> None:
+        from book_translation_pro.runtime import find_binary
+
+        with tempfile.TemporaryDirectory() as temp:
+            readable = Path(temp) / "pandoc.exe"
+            readable.write_bytes(b"")
+            locked = Path(temp) / "locked" / "pandoc.exe"
+            real_is_file = Path.is_file
+
+            def is_file(path: Path) -> bool:
+                if path == locked:
+                    raise PermissionError(13, "Access is denied", str(path))
+                return real_is_file(path)
+
+            with (
+                patch("book_translation_pro.runtime.shutil.which", return_value=None),
+                patch("book_translation_pro.runtime._candidate_paths", return_value=[locked, readable]),
+                patch.object(Path, "is_file", is_file),
+            ):
+                self.assertEqual(find_binary("pandoc"), readable)
+            with (
+                patch("book_translation_pro.runtime.shutil.which", return_value=None),
+                patch("book_translation_pro.runtime._candidate_paths", return_value=[locked]),
+                patch.object(Path, "is_file", is_file),
+            ):
+                self.assertIsNone(find_binary("pandoc"))
+
 
 class ConfigTests(unittest.TestCase):
     def base_config(self) -> dict:

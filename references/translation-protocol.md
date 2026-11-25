@@ -33,7 +33,8 @@ Use `show-unit --phase translate`. Read the source unit, Style Guide, approved G
 - Use natural target-language syntax while preserving meaning, uncertainty, negation, qualifications, warnings, and authorial tone.
 - Translate idioms and culture-bound phrases by their meaning, not word for word: "is lost on most managers" (they do not grasp it), "a Chinese fire drill" (a chaotic scramble), "convert to English" (to plain language), "with the best of them". Keep a number inside a name exactly (`Fortune 50` is 《财富》50 强, never 五百强).
 - Translate every sentence of a long paragraph; a sentence dropped inside a paragraph is the omission no automatic check can see.
-- A sentence a page break splits across two units is translated whole, once, in one of the two units; never leave a fragment marked `……` on either side.
+- A sentence a page break splits across two units is translated whole, once, in one of the two units; never leave a fragment marked `……` on either side. `neighbour_sources` gives the end of the previous unit's source and the start of the next one's (units with no text passed over), so you can see the other half; the edit package adds `neighbour_targets`, the neighbouring drafts.
+- When `visual_evidence` lists `translation_findings` for a page, the page review found something that changes the translation (a misread word, the reading order); follow them, they are why the unit came back.
 - Keep heading markup only on headings. Extraction sometimes marks a paragraph as a heading (`## Chapter 7 addresses …`); translate it as a paragraph. Keep the heading levels the book already uses for its chapters and sections.
 - Keep every note marker (`^8^`, a superscript, `[^8]`) at the word it follows, including in sentences you restructure.
 - Formulas keep every term and operator; a divisor or denominator extraction set on its own line is still part of the formula.

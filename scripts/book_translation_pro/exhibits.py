@@ -1225,6 +1225,11 @@ def build_inventory(source_pdf: Path) -> dict[str, Any]:
             for caption in captions:
                 decision = classify(page, caption, body, claimed)
                 texts = decision.pop("_texts", None)
+                if rotation and decision["classification"] == "diagram":
+                    # Rendering in place works on upright pages only: say so before
+                    # translation, not when the labels come back translated.
+                    decision = decision | {"classification": "uncertain",
+                                           "reason": "a diagram on a sideways page is not rendered in place"}
                 if decision.get("crop"):
                     claimed.append(fitz.Rect(decision["crop"]))
                 item = {
@@ -1239,8 +1244,12 @@ def build_inventory(source_pdf: Path) -> dict[str, Any]:
                         and item["region"][3] > RUNS_ON_SHARE * page.rect.height):
                     runs_on = (item, texts)
     keys = Counter(item["key"] for item in exhibits)
-    for item in exhibits:
+    seen: Counter[str] = Counter()
+    for item in exhibits:  # in page order, then in the order found on the page
         item.get("table", {}).pop("_columns", None)  # kept only to read a following page
-        item["part"] = sum(1 for other in exhibits if other["key"] == item["key"] and other["page"] <= item["page"])
+        # Numbered one by one, so two exhibits with one number on a page (Figure 3.1 and
+        # Table 3.1) are parts 1 and 2, never both part 2.
+        seen[item["key"]] += 1
+        item["part"] = seen[item["key"]]
         item["parts"] = keys[item["key"]]
     return {"schema_version": 1, "body_style": {"font": body[0], "size": body[1]}, "exhibits": exhibits}

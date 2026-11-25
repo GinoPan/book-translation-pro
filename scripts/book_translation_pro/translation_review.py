@@ -229,7 +229,9 @@ def build_translation_review(project: Path, config: dict[str, Any]) -> dict[str,
     items = []
     for u in units:
         old = previous.get(u["unit_id"])
-        if u["unit_id"] not in chosen and not old:
+        # A unit with no reader text is never reviewed, even one judged before it was
+        # emptied: counted, it would make its stretch look more fully read than it is.
+        if u["placeholder"] or (u["unit_id"] not in chosen and not old):
             continue
         item = {"unit_id": u["unit_id"], "chapter": u["chapter"], "source_words": u["source_words"],
                 "reasons": chosen.get(u["unit_id"], ["reviewed before"]), "evidence": u["evidence"],

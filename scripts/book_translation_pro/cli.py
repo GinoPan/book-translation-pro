@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from .project import initialize_project, prepare_project, visualize_project
 from .rights import INTENDED_USES, RIGHTS_STATUSES, rights_config, rights_warning
 from .publication import publication_table_inventory
 from .publication_review import create_review_template, record_publication_review
-from .qa import run_qa
+from .qa import _term_source, run_qa
 from .quality_benchmark import benchmark
 from .release import release_check
 from .retrofit import exhibit_blocks, retrofit_exhibits
@@ -146,17 +147,24 @@ def chapter_context(project: Path, ordered: list[dict[str, Any]], index: int, bu
     return list(reversed(context))
 
 
+_ORIGINAL_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(assets/original/images/([^)\s/]+)\)")
+
+
 def _unit_exhibits(project: Path, source_text: str) -> list[dict[str, Any]]:
     """Label blocks and rebuilt tables in the unit, with what the translator needs
     beside them: the source crop to look at, and totals that do not add up."""
     inventory_path = project / "analysis" / "exhibit-inventory.json"
     inventory = load_json(inventory_path)["exhibits"] if inventory_path.is_file() else []
     out = []
+    previous_end = 0
     for block in exhibit_blocks(source_text):
         item: dict[str, Any] = {"exhibit": block["key"], "kind": block["kind"]}
         if block["kind"] == "figure-labels":
             item["labels"] = len(block["labels"])
-            crop = project / "assets" / "original" / "images" / _figure_asset_name(block["key"])
+            # The picture set right above the block: a later page of a diagram has its own.
+            above = _ORIGINAL_IMAGE_RE.findall(source_text[previous_end:block["span"][0]])
+            name = above[-1] if above else _figure_asset_name(block["key"])
+            crop = project / "assets" / "original" / "images" / name
             if crop.is_file():
                 item["source_image"] = str(crop)
         else:
@@ -165,11 +173,41 @@ def _unit_exhibits(project: Path, source_text: str) -> list[dict[str, Any]]:
                 for exhibit in inventory if exhibit["key"] == block["key"]
                 for total in exhibit.get("checks", {}).get("totals", []) if total["verdict"] == "mismatch"
             ]
+        previous_end = block["span"][1]
         out.append(item)
     return out
 
 
 REVIEW_EDGE_CHARS = 600
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+
+
+def _translation_findings(project: Path, page_index: int) -> list[dict[str, Any]]:
+    """A page review's findings that affect the translation."""
+    path = project / "qa" / "visual-reviews" / f"page-{page_index:04d}.json"
+    if not path.is_file():
+        return []
+    return [finding for finding in load_json(path).get("findings", []) if finding.get("affects_translation")]
+
+
+def _neighbour_edges(project: Path, ordered: list[dict[str, Any]], index: int, field: str) -> dict[str, str]:
+    """The end of the previous unit's text and the start of the next one's.  A unit that
+    holds only comments (an omitted index, an exhibit rebuilt elsewhere) is passed over;
+    a unit not written yet ends the search, so a farther unit is never shown as adjacent."""
+
+    def edge(step: int) -> str:
+        position = index + step
+        while 0 <= position < len(ordered):
+            path = safe_project_path(project, ordered[position][field])
+            if not path.is_file():
+                return ""
+            text = path.read_text(encoding="utf-8").strip()
+            if _COMMENT_RE.sub("", text).strip():
+                return text[-REVIEW_EDGE_CHARS:] if step < 0 else text[:REVIEW_EDGE_CHARS]
+            position += step
+        return ""
+
+    return {"previous_end": edge(-1), "next_start": edge(1)}
 
 
 def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
@@ -186,7 +224,8 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
     # The effective glossary includes reusable libraries, matching what the
     # dependency hashes and QA check.
     glossary = load_effective_glossary(project, config)
-    selected = select_entries(glossary, source_text, entry["book_node_id"])
+    # From the lines the translation renders, as the dependency hash and QA select them.
+    selected = select_entries(glossary, _term_source(source_text), entry["book_node_id"])
     # Renderings earlier units chose for names and terms the glossary lacks: context to
     # follow, not a dependency, so a growing ledger never makes a finished unit stale.
     ledger = build_ledger(project, [item["unit_id"] for item in ordered])
@@ -230,6 +269,9 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
                 "layout": page["layout"],
                 "risk": page["risk"],
                 "crops": [str(safe_project_path(project, region["asset_ref"])) for region in page["regions"] if region.get("asset_ref")],
+                # What the page review found that changes the translation (a misread word, a
+                # wrong reading order): the reason a unit comes back, so the worker must see it.
+                "translation_findings": _translation_findings(project, page["page_index"]),
             }
             for page in page_map["pages"] if page["page_index"] in wanted
         ]
@@ -248,17 +290,14 @@ def show_unit(project: Path, unit_id: str, phase: str) -> dict[str, Any]:
         payload["review_file"] = str(template)
         payload["review_reasons"] = item["reasons"]
         payload["earlier_findings"] = item["findings"]
-
-        # Translators move a sentence split by a page break to one side of the join;
-        # the reviewer needs both edges to tell a moved sentence from a dropped one.
-        def edge(offset: int) -> str:
-            if not 0 <= index + offset < len(ordered):
-                return ""
-            path = safe_project_path(project, ordered[index + offset][target_field])
-            text = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
-            return text[-REVIEW_EDGE_CHARS:] if offset < 0 else text[:REVIEW_EDGE_CHARS]
-
-        payload["neighbour_targets"] = {"previous_end": edge(-1), "next_start": edge(1)}
+    # A sentence a page break splits runs on into the neighbouring unit: the translator
+    # needs the other half to translate it whole, and the reviewer both edges to tell a
+    # moved sentence from a dropped one.  Context only, never a dependency.
+    if phase in {"translate", "edit", "review"}:
+        payload["neighbour_sources"] = _neighbour_edges(project, ordered, index, "source_file")
+    if phase in {"edit", "review"}:
+        target_field = "edit_file" if phase == "review" and config["passes"]["edit"] else "draft_file"
+        payload["neighbour_targets"] = _neighbour_edges(project, ordered, index, target_field)
     if phase == "translate":
         payload["dependency_hashes"] = dispatch_unit(project, unit_id)
     return payload

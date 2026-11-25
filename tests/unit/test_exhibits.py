@@ -79,6 +79,34 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(sorted(label["text"] for label in exhibit["labels"]),
                              ["Customer Needs", "Feedback", "Strategy Changes"])
 
+    def test_a_diagram_on_a_sideways_page_is_flagged_before_translation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "book.pdf"
+            _diagram_pdf(pdf)
+            # The same page, but read through an upright copy of a sideways page.
+            with mock.patch("book_translation_pro.exhibits.upright_page",
+                            side_effect=lambda document, number: (document[number - 1], -90, None)):
+                (exhibit,) = build_inventory(pdf)["exhibits"]
+            self.assertEqual((exhibit["classification"], exhibit["rotation"]), ("uncertain", -90))
+            self.assertIn("sideways page", exhibit["reason"])
+            # Upright, it is a diagram as before.
+            (exhibit,) = build_inventory(pdf)["exhibits"]
+            self.assertEqual(exhibit["classification"], "diagram")
+
+    def test_two_exhibits_with_one_number_on_a_page_are_parts_one_and_two(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "book.pdf"
+            _diagram_pdf(pdf)
+            document = fitz.open(pdf)
+            document[0].insert_text((72, 560), "TABLE 1.1 Costs by Value Stream", fontname="hebo", fontsize=9)
+            page = document.new_page()
+            page.insert_text((72, 300), "EXHIBIT 1.1 Continued", fontname="hebo", fontsize=9)
+            document.saveIncr()
+            document.close()
+            inventory = build_inventory(pdf)
+            self.assertEqual([(e["page"], e["part"], e["parts"]) for e in inventory["exhibits"]],
+                             [(1, 1, 3), (1, 2, 3), (2, 3, 3)])
+
     def test_a_caption_title_on_two_lines_keeps_its_second_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pdf = Path(directory) / "book.pdf"

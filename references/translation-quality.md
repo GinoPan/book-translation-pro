@@ -42,15 +42,15 @@ Each finding has a severity, weighted as in MQM 2.0:
 
    | Check | Status | Finds |
    |---|---|---|
-   | `content.repeated_text` | fail | A sentence the target repeats more often than the source repeats any, within a unit or across the join of two units |
+   | `content.repeated_text` | fail | A sentence the target repeats more often than the source repeats any, within a unit or across the join of two units. A source repeat counts from half the target's weight (a list item of seven English words becomes fourteen Chinese characters), and two source sentences that differ by a slip, with the same numbers, count as a repeat |
    | `style.typography` | warn | Language-profile typography: half-width punctuation between Chinese characters, doubled punctuation, a space between characters, zero-width characters, unpaired quotation marks and brackets |
    | `terminology.name_consistency` | warn | A name printed in English in some units and translated in others (one summary line; details in `qa/translation-signals.json`) |
    | `terminology.ledger` / `terminology.ledger_conflict` | warn | A unit that departs from a recorded rendering; a term recorded with two renderings |
    | `content.excused_units` | warn | A fifth or more of the units carry a reflow or reconstruction note, which turns their paragraph, length, and number checks into warnings |
    | `content.split_sentence` | warn | A translation that ends or starts with `……` the source does not have: a sentence split by a page break left as fragments |
-   | `content.note_markers` | warn | Fewer note markers (`^8^`, superscripts, `[^8]`, a digit after full-width punctuation) in the translation than in the source, counted with the neighbouring units so a marker that moved with its sentence is not reported |
+   | `content.note_markers` | warn | Fewer note markers (`^8^`, `<sup>8</sup>`, superscripts, `[^8]`, a digit after full-width punctuation that no measure word follows) in the translation than in the source, counted with the neighbouring units so a marker that moved with its sentence is not reported |
    | `structure.heading_paragraph` | warn | A heading that is a paragraph: about 67 Chinese characters or more, ending in a full stop |
-   | `terminology.hyphenated` | warn | An approved term the source prints hyphenated (`Kan-Ban`), which the glossary selection misses, absent from the translation. The selection itself is a dependency and is left unchanged |
+   | `terminology.hyphenated` | warn | An approved term the source prints hyphenated (`Kan-Ban`), which the glossary selection misses, absent from the translation. The selection itself is a dependency and is left unchanged for hyphens; like QA, it reads only the lines a translation renders (no running heads or scrambled sideways text) |
 
    Typography leaves out diagram labels (spaced to fit a drawing) and counts a bare link as a word. The name check also finds names the source prints in capitals (`DR. C. J. MCNAIR`) and leaves out placeholder units. It still counts a name kept in English in a citation, as the name policy requires, as an English mention; on Lean most of the 12 names it lists after the fixes are of that kind.
 
@@ -101,6 +101,16 @@ Rejected after measurement (do not reintroduce without new evidence):
 - **Abbreviations as omission anchors:** headings in capitals look like abbreviations, and MBA or CPA are rightly translated.
 - **Treating target-only numbers as unexcusable under a reflow note:** 46 finished Lean units have them (renumbered notes, rebuilt tables).
 - **Learning a name's Chinese form from glosses** such as `首席执行官（CEO）`: it mostly finds abbreviations, which are rightly used bare after their first gloss. A name's rendering comes from the glossary or the ledger.
+- **Near-identical source sentences at a ratio of 0.9, numbers ignored:** table rows that differ only in their numbers ("Cell 1 produced 250 units", "Cell 2 produced 260 units") counted as one repeated sentence and excused planted repeats (Lean recall 90% to 87%). The numbers must now match and the ratio be 0.97.
+
+### The second book (Practical Lean Accounting, 2026-11-25)
+
+Running the tool on a second book (620 units, from CHM) found two failures that blocked it, both fixed and measured on both books:
+
+- `content.repeated_text` failed 3 faithful units: a list item the source repeats is under the repeat weight in English and over it in Chinese, and one source repeat differs by a typo ("waits" / "awaits"). With the source counted from half the weight and same-numbered near-duplicates: the 3 units pass, and planted-error recall stays at the baseline (Lean: repeated sentence 165 of 185 caught, was 166; across a join 198 of 203, was 199. Practical: 79% and 98%, as before).
+- The bilingual EPUB failed its table count: removing a CHM spacer image left 196 empty divider tables, which Pandoc drops. The bilingual side now drops a table its cleaning emptied (278 tables to 82 on Practical, no line with text removed).
+
+The note-marker check now counts `<sup>8</sup>` (Practical's 6 markers were invisible to it) and no longer takes a quantity after punctuation (`其中，10家企业`) for a marker; on Lean it still flags the same 19 units of the original translation and none of the fixed one.
 
 ## Changing a check
 
