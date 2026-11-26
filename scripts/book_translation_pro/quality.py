@@ -209,6 +209,39 @@ def split_fragments(units: list[Unit]) -> list[dict[str, Any]]:
     return out
 
 
+# A source block that ends a sentence: its stop, then closing quotes, brackets, emphasis,
+# or a note marker.  A block that ends otherwise runs on into the next one.
+_BLOCK_END_RE = re.compile(r"[.!?:;…。！？：；][\s\"'”’)）*_\]^\d]*$")
+
+
+def unexplained_shortfalls(units: list[Unit]) -> list[dict[str, Any]]:
+    """Units whose translation has fewer paragraphs than the source, behind a note that
+    excuses it (QA then only warns), by more than a reflow can explain.
+
+    A reflow joins a block that runs on into the next (one that does not end a sentence,
+    or a first block starting in lower case that continues the previous unit), or moves
+    blocks into a neighbouring translation, which then has more blocks than its source.
+    A paragraph that ends a sentence and is gone is not a reflow.  Measured on Lean
+    Accounting, this picks 11 of 133 excused shortfalls: the unit that dropped a biography
+    paragraph, and 10 whose notes say PDF extraction split lines or exhibits."""
+    from .qa import STRUCTURE_EVIDENCE_PREFIXES, _has_evidence, _prose_blocks
+
+    counts = [(len(_prose_blocks(source)), len(_prose_blocks(target))) for _u, source, target, _o in units]
+    out = []
+    for index, (unit_id, source, target, observation) in enumerate(units):
+        source_blocks, target_blocks = counts[index]
+        if not target_blocks or source_blocks <= target_blocks or not _has_evidence(observation, STRUCTURE_EVIDENCE_PREFIXES):
+            continue
+        blocks = [block.strip() for block in _prose_blocks(source)]
+        run_on = sum(1 for block in blocks if not _BLOCK_END_RE.search(block))
+        continued = int(bool(re.match(r"[a-z]", blocks[0])))
+        moved = sum(max(0, t - s) for s, t in (counts[i] for i in (index - 1, index + 1) if 0 <= i < len(units)))
+        missing = source_blocks - target_blocks - run_on - continued - moved
+        if missing > 0:
+            out.append({"unit_id": unit_id, "source": source_blocks, "target": target_blocks, "missing": missing})
+    return out
+
+
 _HEADING_LINE_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.M)
 _SENTENCE_STOP = ("。", "！", "？", ".", "!", "?")
 HEADING_PARAGRAPH_WEIGHT = 40   # about 67 Chinese characters; chapter titles stay far below

@@ -145,7 +145,8 @@ def translated_units(project: Path, config: dict[str, Any]) -> list[dict[str, An
 def _signals(units: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, list[str]]:
     """Why the rule checks point at a unit: reasons to read it first.  Names rendered two
     ways are a book-level question for the reviewer's consistency pass, not unit picks."""
-    from .quality import note_marker_gaps, profile_for, repeated_text, split_fragments, typography_issues, unit_signals
+    from .quality import (note_marker_gaps, profile_for, repeated_text, split_fragments, typography_issues,
+                          unexplained_shortfalls, unit_signals)
 
     profile = profile_for(config["target"]["language"])
     reasons: dict[str, list[str]] = {u["unit_id"]: unit_signals(u["source"], u["target"], profile) for u in units}
@@ -156,6 +157,10 @@ def _signals(units: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, l
         reasons[gap["unit_id"]].append(f"{gap['source']} note markers in the source, {gap['target']} in the translation")
     for fragment in split_fragments(quads):
         reasons[fragment["unit_id"]].append(f"sentence fragment at the {fragment['where']}")
+    for short in unexplained_shortfalls(quads):
+        reasons[short["unit_id"]].append(
+            f"{short['source']} paragraphs in the source, {short['target']} in the translation: "
+            f"{short['missing']} more missing than a reflow explains")
     if profile:
         for u in units:
             if typography_issues(u["target"], profile):
@@ -438,7 +443,8 @@ def rule_proposals(projects: list[Path], min_count: int = PROPOSAL_MIN_COUNT, ou
                 if len(group["examples"]) < 3:
                     group["examples"].append({"book": project.name, "unit_id": item["unit_id"],
                                               "source": finding["source_excerpt"][:200],
-                                              "target": finding["target_excerpt"][:200], "note": finding["note"]})
+                                              "target": finding["target_excerpt"][:200], "note": finding["note"],
+                                              "picked_for": item.get("reasons", [])})
     proposals = []
     for group in sorted(groups.values(), key=lambda g: (-g["weight"], -g["count"])):
         covered = [check for category in group["categories"] for check in COVERED_BY.get(category, [])]
@@ -446,8 +452,9 @@ def rule_proposals(projects: list[Path], min_count: int = PROPOSAL_MIN_COUNT, ou
         group["existing_checks"] = covered
         group["proposal"] = group["count"] >= min_count
         group["suggestion"] = (
-            f"the checks {', '.join(covered)} look for this category but missed these; add the examples to their "
-            "tests and widen the rule, or add a protocol line if no rule can see it"
+            f"the checks {', '.join(covered)} look for this category.  Where an example's unit was picked by a "
+            "signal for this kind of error, a check already saw it and only warned; for the others, add the examples "
+            "to the checks' tests and widen the rule, or add a protocol line if no rule can see it"
             if covered else
             "no automatic check looks for this; add a line to the translation protocol or style guide, and a check "
             "if the cause can be recognised in the text")
@@ -463,7 +470,9 @@ def rule_proposals(projects: list[Path], min_count: int = PROPOSAL_MIN_COUNT, ou
                   f"{group['count']} finding(s), weight {group['weight']}, in {', '.join(group['books'])}. "
                   f"Suggestion: {group['suggestion']}.", ""]
         for example in group["examples"]:
-            lines.append(f"- {example['book']} {example['unit_id']}: {example['source']!r} → {example['target']!r} ({example['note']})")
+            picked = "; ".join(example["picked_for"]) or "unknown"
+            lines.append(f"- {example['book']} {example['unit_id']}: {example['source']!r} → {example['target']!r} "
+                         f"({example['note']}) Picked for: {picked}.")
         lines.append("")
     atomic_write_text(out_dir / "rule-proposals.md", "\n".join(lines))
     return {"books": books, "groups": len(proposals), "proposed": [g["cause"] for g in proposals if g["proposal"]],

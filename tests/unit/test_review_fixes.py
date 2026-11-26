@@ -600,6 +600,64 @@ class TermCheckSource(unittest.TestCase):
             self.assertEqual([e["id"] for e in package["glossary_entries"]], ["preload"])
             self.assertNotEqual(package["dependency_hashes"]["glossary_selection"], hash_data({}))
 
+    def _unit_recorded_with_whole_source_selection(self, root: Path) -> tuple[dict, str]:
+        """A unit translated when terms were picked from every source line: its record holds
+        the hash of a selection that includes a term found only in a running head."""
+        from book_translation_pro.artifacts import hash_data
+        from book_translation_pro.glossary import load_effective_glossary, selected_hashes
+        from book_translation_pro.state import save_state
+
+        config, _ = make_project(root, with_term=True)
+        record_review(root, "terminology", True, "tester", "approved")
+        source_text = "**88** **Bearing Preload**\n\nThe shaft turns freely.\n"
+        atomic_write_text(root / "source-work" / "work-units" / "unit-0001.md", source_text)
+        for kind, folder in (("draft", "draft"), ("edit", "edited")):
+            atomic_write_text(root / "target" / folder / "unit-0001.md", "轴可以自由转动。\n")
+            if kind == "draft":
+                dispatch_unit(root, "unit-0001")
+            record_text_output(root, "unit-0001", kind)
+        glossary = load_effective_glossary(root, config)
+        node = load_manifest(root)["units"][0]["book_node_id"]
+        whole = hash_data(selected_hashes(glossary, source_text, node))
+        self.assertNotEqual(whole, hash_data({}))
+        state = load_state(root)
+        state["units"]["unit-0001"]["dependency_hashes"]["glossary_selection"] = whole
+        save_state(root, state)
+        return config, whole
+
+    def test_a_record_from_the_whole_source_selection_stays_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _ = self._unit_recorded_with_whole_source_selection(root)
+            plan = plan_run(root, True, 2)
+            self.assertEqual(plan["translation_unit_ids"], [])
+            stale = [c for c in run_qa(root, config)["checks"] if c["id"] == "unit.stale"]
+            self.assertEqual(stale, [])
+
+    def test_a_changed_term_still_makes_such_a_record_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._unit_recorded_with_whole_source_selection(root)
+            glossary = json.loads((root / "terminology" / "glossary.json").read_text(encoding="utf-8"))
+            glossary["entries"][0]["target"] = "预加载"
+            save_glossary(root, glossary)
+            plan = plan_run(root, True, 2)
+            self.assertEqual(plan["translation_unit_ids"], ["unit-0001"])
+            self.assertIn("dependency_changed:glossary_selection", plan["details"]["unit-0001"])
+
+    def test_an_unrelated_selection_hash_is_still_stale(self) -> None:
+        from book_translation_pro.state import save_state
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _ = self._unit_recorded_with_whole_source_selection(root)
+            state = load_state(root)
+            state["units"]["unit-0001"]["dependency_hashes"]["glossary_selection"] = "0" * 64
+            save_state(root, state)
+            stale = [c for c in run_qa(root, config)["checks"] if c["id"] == "unit.stale"]
+            self.assertEqual(len(stale), 1)
+            self.assertIn("glossary_selection", stale[0]["message"])
+
 
 class ConcurrentRecording(unittest.TestCase):
     def test_parallel_workers_do_not_lose_records(self) -> None:

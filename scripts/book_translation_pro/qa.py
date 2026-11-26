@@ -14,7 +14,7 @@ from .exceptions import approved_exception_ids
 from .glossary import build_ledger, entry_matches, load_effective_glossary, select_entries, target_matches
 from .manifest import load_manifest, validate_manifest_sources
 from .config import config_drifted
-from .state import load_state, now_utc, recorded_dependencies, save_state, unit_dependencies
+from .state import load_state, map_whole_source_selection, now_utc, recorded_dependencies, save_state, unit_dependencies
 from .publication import (
     clean_markdown_for_publication,
     prepare_publication_markdown,
@@ -934,7 +934,8 @@ def run_qa(project: Path, config: dict[str, Any]) -> dict[str, Any]:
                    f"Unit status is {record.get('status', 'missing')!r}; run plan and complete it", unit_id)
         else:
             current = unit_dependencies(project, manifest, config, glossary, unit_id)
-            recorded = recorded_dependencies(record, manifest, config)
+            recorded = map_whole_source_selection(
+                project, entry, glossary, recorded_dependencies(record, manifest, config), current)
             if record.get("status") == "skipped_approved":
                 # Markup-only units are copied verbatim; only their source matters.
                 current = {"source": current["source"]}

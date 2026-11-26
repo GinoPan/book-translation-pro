@@ -219,6 +219,30 @@ def recorded_dependencies(record: dict[str, Any], manifest: dict[str, Any], conf
     return dependencies
 
 
+def map_whole_source_selection(
+    project: Path, entry: dict[str, Any], glossary: dict[str, Any],
+    recorded: dict[str, str], current: dict[str, str],
+) -> dict[str, str]:
+    """Map a record whose glossary selection was made from the whole source to the current one.
+
+    Terms were once selected from every source line, running heads included; they are
+    now selected from the rendered lines only, which can drop terms and never add one.
+    A record whose hash is the whole-source selection, of which the current selection is
+    a part, was translated with every term the current selection holds: it is current.
+    """
+    hash_now = current.get("glossary_selection")
+    if recorded.get("glossary_selection") in (None, hash_now):
+        return recorded
+    from .qa import _term_source
+
+    source_text = safe_project_path(project, entry["source_file"]).read_text(encoding="utf-8")
+    whole = selected_hashes(glossary, source_text, entry["book_node_id"])
+    rendered = selected_hashes(glossary, _term_source(source_text), entry["book_node_id"])
+    if recorded["glossary_selection"] == hash_data(whole) and rendered.items() <= whole.items():
+        return {**recorded, "glossary_selection": hash_now}
+    return recorded
+
+
 def _dispatch_path(project: Path, unit_id: str) -> Path:
     return safe_project_path(project, f"state/dispatch/{unit_id}.json")
 
@@ -312,7 +336,8 @@ def plan_run(project: Path, require_edit: bool, max_attempts: int) -> dict[str, 
         draft = safe_project_path(project, entry["draft_file"])
         reasons: list[str] = []
         dependencies = _current_dependencies(project, entry, config, glossary, previous)
-        recorded = recorded_dependencies(record, manifest, config)
+        recorded = map_whole_source_selection(
+            project, entry, glossary, recorded_dependencies(record, manifest, config), dependencies)
         if record["attempts"] >= max_attempts and record["status"] in {"failed_retryable", "failed_terminal"}:
             reasons.append("attempt_limit_reached")
             blocked.append(f"attempt_limit_reached:{unit_id}")
