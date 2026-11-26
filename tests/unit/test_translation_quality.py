@@ -21,6 +21,7 @@ from book_translation_pro.quality import (
     split_fragments,
     term_candidates,
     typography_issues,
+    unexplained_shortfalls,
 )
 from book_translation_pro.quality_benchmark import (
     PLANTED,
@@ -664,6 +665,49 @@ class ReviewLessonCheckTests(unittest.TestCase):
         self.assertEqual(note_marker_gaps([_unit("unit-0001", source, "它有三个步骤。4十家企业加入了。")]), [])
 
 
+REFLOWED = {"source_issues": ["structure_reflowed: lines of the PDF joined into paragraphs"]}
+
+
+class UnexplainedShortfallTests(unittest.TestCase):
+    """A reflow note turns a paragraph shortfall into a warning; a paragraph that ends a
+    sentence and is gone is more than a reflow, so the review reads the unit."""
+
+    BIO = ("He led a number of financial initiatives.\n\n"
+           "A certified public accountant, he began his career at Deloitte & Touche.\n\n"
+           "He is a member of the Ohio Society of CPAs.")
+
+    def test_a_dropped_paragraph_behind_a_reflow_note_is_picked(self) -> None:
+        units = [_unit("unit-0001", self.BIO, "他领导过多项财务举措。\n\n他是俄亥俄州注册会计师协会会员。", REFLOWED)]
+        self.assertEqual(unexplained_shortfalls(units),
+                         [{"unit_id": "unit-0001", "source": 3, "target": 2, "missing": 1}])
+        from book_translation_pro.translation_review import _signals
+
+        reasons = _signals([{"unit_id": u, "source": s, "target": t, "observation": o} for u, s, t, o in units],
+                           {"target": {"language": "zh-CN"}})
+        self.assertIn("1 more missing than a reflow explains", " ".join(reasons["unit-0001"]))
+
+    def test_paragraphs_joined_where_a_line_runs_on_are_left_alone(self) -> None:
+        source = "The team leader reviews cell performance during the\n\nupcoming shift and assigns problems.\n\nDone."
+        units = [_unit("unit-0001", source, "团队负责人检查即将开始班次的单元绩效并分派问题。\n\n完成。", REFLOWED)]
+        self.assertEqual(unexplained_shortfalls(units), [])
+
+    def test_a_paragraph_moved_to_the_next_unit_is_left_alone(self) -> None:
+        units = [_unit("unit-0001", self.BIO, "他领导过多项财务举措。\n\n他在德勤开始职业生涯。", REFLOWED),
+                 _unit("unit-0002", "Mr. Johnson teaches.", "他是俄亥俄州注册会计师协会会员。\n\nJohnson 先生任教。")]
+        self.assertEqual(unexplained_shortfalls(units), [])
+
+    def test_a_continuation_from_the_previous_unit_is_left_alone(self) -> None:
+        source = "with the shift ending.\n\nThe cell restarts.\n\nIt runs."
+        units = [_unit("unit-0001", source, "单元重新启动。\n\n它在运行。", REFLOWED)]
+        self.assertEqual(unexplained_shortfalls(units), [])
+
+    def test_no_note_or_no_text_is_not_this_signal(self) -> None:
+        # Without a note QA already fails the shortfall; an emptied unit is a placeholder.
+        dropped = "他领导过多项财务举措。\n\n他是俄亥俄州注册会计师协会会员。"
+        self.assertEqual(unexplained_shortfalls([_unit("unit-0001", self.BIO, dropped)]), [])
+        self.assertEqual(unexplained_shortfalls([_unit("unit-0001", self.BIO, "<!-- rebuilt in unit-0002 -->", REFLOWED)]), [])
+
+
 class RuleProposalTests(unittest.TestCase):
     def test_causes_recurring_across_books_are_proposed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -675,7 +719,9 @@ class RuleProposalTests(unittest.TestCase):
                 findings = [dict(_finding("major", "fixed"), category="terminology.wrong_term", cause=cause)
                             if cause != "sentence-dropped" else _finding("minor", "fixed") for cause in causes]
                 findings.append(dict(_finding(), cause="not-an-error", status="dismissed"))
-                atomic_write_json(project / RECORD, {"items": [{"unit_id": "unit-0001", "findings": findings}]})
+                atomic_write_json(project / RECORD, {"items": [{"unit_id": "unit-0001", "findings": findings,
+                                                                "reasons": ["sample of its part of the book",
+                                                                            "typography slips"]}]})
                 books.append(project)
             result = rule_proposals(books, min_count=3, output=root)
             self.assertEqual(result["proposed"], ["term-not-in-glossary"])
@@ -684,6 +730,11 @@ class RuleProposalTests(unittest.TestCase):
             self.assertEqual((top["count"], top["books"]), (3, ["book-a", "book-b"]))
             self.assertEqual(top["existing_checks"], ["terminology.approved"])
             self.assertNotIn("not-an-error", [g["cause"] for g in report["groups"]])
+            # Why each example's unit was read: a check that flagged it saw it, so it did not miss it.
+            self.assertEqual(top["examples"][0]["picked_for"], ["sample of its part of the book", "typography slips"])
+            text = (root / "rule-proposals.md").read_text(encoding="utf-8")
+            self.assertIn("Picked for: sample of its part of the book; typography slips.", text)
+            self.assertNotIn("missed these", text)
 
     def test_a_cause_is_counted_across_categories(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
